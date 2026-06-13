@@ -1,24 +1,36 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "FitPose AI",
+    "slug": "fitpose-ai",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#0A0A0A"
     },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow camera access to run MoveNet pose estimation on your device."
+        }
+      ],
+      "expo-asset"
+    ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Camera is used for real-time pose estimation with MoveNet inside the app WebView."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#0A0A0A"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
