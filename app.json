@@ -24,8 +24,10 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSCameraUsageDescription": "Camera is used for real-time pose estimation with MoveNet inside the app WebView."
-      }
+        "NSCameraUsageDescription": "Camera is used for real-time pose estimation with MoveNet inside the app WebView.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.wensee.fitposeai"
     },
     "android": {
       "adaptiveIcon": {
@@ -36,8 +38,11 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"
-      ]
+      ],
+      "package": "com.wensee.fitposeai"
     },
     "web": {
       "favicon": "./assets/favicon.png"
