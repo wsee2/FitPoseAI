@@ -19,7 +19,8 @@
           "cameraPermission": "Allow camera access to run MoveNet pose estimation on your device."
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "react-native-vision-camera"
     ],
     "ios": {
       "supportsTablet": true,
