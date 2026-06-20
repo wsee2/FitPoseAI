@@ -13,19 +13,18 @@
       "backgroundColor": "#0A0A0A"
     },
     "plugins": [
-      [
-        "expo-camera",
-        {
-          "cameraPermission": "Allow camera access to run MoveNet pose estimation on your device."
-        }
-      ],
       "expo-asset",
-      "react-native-vision-camera"
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "FitPose AI requires camera access for posture detection."
+        }
+      ]
     ],
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSCameraUsageDescription": "Camera is used for real-time pose estimation with MoveNet inside the app WebView.",
+        "NSCameraUsageDescription": "Camera is used for real-time posture detection using MoveNet Lightning.",
         "ITSAppUsesNonExemptEncryption": false
       },
       "bundleIdentifier": "com.wensee.fitposeai"
@@ -38,8 +37,6 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
-        "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"
       ],

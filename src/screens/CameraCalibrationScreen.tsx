@@ -5,7 +5,7 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Rect, Line, Defs, LinearGradient as SvgGrad, Stop } from 'react-native-svg';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { Camera, useCameraDevice, useCameraPermission } from 'react-native-vision-camera';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RouteProp } from '@react-navigation/native';
 import { Colors, BorderRadius } from '../theme';
@@ -30,8 +30,8 @@ export default function CameraCalibrationScreen({ navigation, route }: Props) {
   const { exerciseId } = route.params;
   const exercise = EXERCISES[exerciseId];
   const insets = useSafeAreaInsets();
-  const [permission, requestPermission] = useCameraPermissions();
-  const hasCameraPermission = permission?.granted ?? null;
+  const device = useCameraDevice('back');
+  const { hasPermission, requestPermission } = useCameraPermission();
   const [checkedItems, setCheckedItems] = useState<Record<string, boolean>>({});
   const [countdown, setCountdown] = useState<number | null>(null);
   const [isReady, setIsReady] = useState(false);
@@ -44,15 +44,14 @@ export default function CameraCalibrationScreen({ navigation, route }: Props) {
   }, []);
 
   useEffect(() => {
-    // Simulate body detection after permission granted
-    if (hasCameraPermission) {
+    if (hasPermission) {
       const timer = setTimeout(() => {
         setCheckedItems({ body: true, lighting: true, space: true, camera: true });
         setIsReady(true);
       }, 2000);
       return () => clearTimeout(timer);
     }
-  }, [hasCameraPermission]);
+  }, [hasPermission]);
 
   useEffect(() => {
     // Scanning animation
@@ -102,8 +101,8 @@ export default function CameraCalibrationScreen({ navigation, route }: Props) {
   return (
     <View style={styles.container}>
       {/* Camera preview or placeholder */}
-      {hasCameraPermission ? (
-        <CameraView style={StyleSheet.absoluteFill} facing="back" />
+      {hasPermission && device ? (
+        <Camera style={StyleSheet.absoluteFill} device={device} isActive={true} />
       ) : (
         <View style={[StyleSheet.absoluteFill, styles.cameraPlaceholder]}>
           <LinearGradient colors={['#050510', '#0A0A20']} style={StyleSheet.absoluteFill} />
