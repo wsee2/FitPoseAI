@@ -16,6 +16,7 @@ import { EXERCISES } from '../data/exercises';
 import { useApp } from '../context/AppContext';
 import { getPoseHtml } from '../poseHtml';
 import type { HomeStackParamList } from '../navigation/types';
+import { loadMoveNetModel } from '../services/moveNet';
 
 const { width, height } = Dimensions.get('window');
 type Props = {
@@ -105,6 +106,10 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       Animated.spring(repAnim, { toValue: 1, useNativeDriver: true, tension: 300, friction: 10 }),
     ]).start();
   }, [stats.reps]);
+
+  useEffect(() => {
+    loadMoveNetModel().catch(err => console.error('Model load failed:', err));
+  }, []);
 
   // Animate feedback changes
   const updateFeedback = (text: string) => {
