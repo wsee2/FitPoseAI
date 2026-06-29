@@ -17,7 +17,8 @@
       [
         "react-native-vision-camera",
         {
-          "cameraPermissionText": "FitPose AI requires camera access for posture detection."
+          "cameraPermissionText": "FitPose AI requires camera access for posture detection.",
+          "enableFrameProcessors": true
         }
       ]
     ],
