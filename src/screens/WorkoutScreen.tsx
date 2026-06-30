@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import {
   Camera,
@@ -20,6 +20,12 @@ import { useResizePlugin } from 'vision-camera-resize-plugin';
 import type { TensorflowModel } from 'react-native-fast-tflite';
 import type { HomeStackParamList } from '../navigation/types';
 import { loadMoveNetModel } from '../services/moveNet';
+import { formatDuration } from '../data/exercises';
+import { INITIAL_SQUAT_STATE, SquatFsm, type SquatFsmState } from '../services/fsm/squatFsm';
+import { INITIAL_PUSHUP_STATE, PushupFsm, type PushupFsmState } from '../services/fsm/pushupFsm';
+import { INITIAL_LUNGE_STATE, LungeFsm, type LungeFsmState } from '../services/fsm/lungeFsm';
+import { INITIAL_PLANK_STATE, PlankFsm, type PlankFsmState } from '../services/fsm/plankFsm';
+import { INITIAL_SITUP_STATE, SitupFsm, type SitupFsmState } from '../services/fsm/situpFsm';
 import SkeletonOverlay, { CONF_THRESHOLD } from '../components/SkeletonOverlay';
 
 // Tune: run inference every N frames. Inference itself (not this throttle) is the real
@@ -57,7 +63,8 @@ type Props = {
   route: RouteProp<HomeStackParamList, 'Workout'>;
 };
 
-export default function WorkoutScreen({ navigation: _navigation, route: _route }: Props) {
+export default function WorkoutScreen({ navigation: _navigation, route }: Props) {
+  const { exerciseId } = route.params;
   const { width: previewWidth, height: previewHeight } = useWindowDimensions();
   const { hasPermission, requestPermission } = useCameraPermission();
   const frontDevice = useCameraDevice('front');
@@ -71,6 +78,47 @@ export default function WorkoutScreen({ navigation: _navigation, route: _route }
   const frameCount = useSharedValue(0);
   // Drives the overlay's animated render — interpolated toward each new sample
   const animatedKeypoints = useReanimatedValue<number[]>(new Array(51).fill(0));
+
+  // One FSM instance per exercise, all live for the screen's lifetime; trivial constructors
+  // so re-creating them on a hot-reload/re-render is harmless. Only the active exerciseId's
+  // FSM is fed frames and reset.
+  const squatFsmRef = useRef(new SquatFsm());
+  const [squatState, setSquatState] = useState<SquatFsmState>(INITIAL_SQUAT_STATE);
+  const pushupFsmRef = useRef(new PushupFsm());
+  const [pushupState, setPushupState] = useState<PushupFsmState>(INITIAL_PUSHUP_STATE);
+  const lungeFsmRef = useRef(new LungeFsm());
+  const [lungeState, setLungeState] = useState<LungeFsmState>(INITIAL_LUNGE_STATE);
+  const plankFsmRef = useRef(new PlankFsm());
+  const [plankState, setPlankState] = useState<PlankFsmState>(INITIAL_PLANK_STATE);
+  const situpFsmRef = useRef(new SitupFsm());
+  const [situpState, setSitupState] = useState<SitupFsmState>(INITIAL_SITUP_STATE);
+
+  // Reset the active exercise's FSM whenever the screen is entered or the exercise changes,
+  // so leftover state (counter, stage, smoothing buffers) from a prior session doesn't bleed in.
+  useEffect(() => {
+    switch (exerciseId) {
+      case 'squat':
+        squatFsmRef.current.reset();
+        setSquatState(INITIAL_SQUAT_STATE);
+        break;
+      case 'pushup':
+        pushupFsmRef.current.reset();
+        setPushupState(INITIAL_PUSHUP_STATE);
+        break;
+      case 'lunge':
+        lungeFsmRef.current.reset();
+        setLungeState(INITIAL_LUNGE_STATE);
+        break;
+      case 'plank':
+        plankFsmRef.current.reset();
+        setPlankState(INITIAL_PLANK_STATE);
+        break;
+      case 'situp':
+        situpFsmRef.current.reset();
+        setSitupState(INITIAL_SITUP_STATE);
+        break;
+    }
+  }, [exerciseId]);
 
   useEffect(() => {
     requestPermission();
@@ -100,8 +148,25 @@ export default function WorkoutScreen({ navigation: _navigation, route: _route }
         duration: SMOOTHING_MS,
         easing: Easing.linear,
       });
+      switch (exerciseId) {
+        case 'squat':
+          setSquatState(squatFsmRef.current.update(kp));
+          break;
+        case 'pushup':
+          setPushupState(pushupFsmRef.current.update(kp));
+          break;
+        case 'lunge':
+          setLungeState(lungeFsmRef.current.update(kp));
+          break;
+        case 'plank':
+          setPlankState(plankFsmRef.current.update(kp));
+          break;
+        case 'situp':
+          setSitupState(situpFsmRef.current.update(kp));
+          break;
+      }
     },
-    []
+    [exerciseId]
   );
 
   const frameProcessor = useFrameProcessor(
@@ -186,6 +251,41 @@ export default function WorkoutScreen({ navigation: _navigation, route: _route }
         width={previewWidth}
         height={previewHeight}
       />
+      {exerciseId === 'squat' && (
+        <View style={styles.repPanel}>
+          <Text style={styles.repCount}>{squatState.counter}</Text>
+          <Text style={styles.stageLabel}>{squatState.stage ?? '—'}</Text>
+          <Text style={styles.feedbackText}>{squatState.feedback}</Text>
+        </View>
+      )}
+      {exerciseId === 'pushup' && (
+        <View style={styles.repPanel}>
+          <Text style={styles.repCount}>{pushupState.counter}</Text>
+          <Text style={styles.stageLabel}>{pushupState.stage ?? '—'}</Text>
+          <Text style={styles.feedbackText}>{pushupState.feedback}</Text>
+        </View>
+      )}
+      {exerciseId === 'lunge' && (
+        <View style={styles.repPanel}>
+          <Text style={styles.repCount}>{lungeState.counter}</Text>
+          <Text style={styles.stageLabel}>{lungeState.stage ?? '—'}</Text>
+          <Text style={styles.feedbackText}>{lungeState.feedback}</Text>
+        </View>
+      )}
+      {exerciseId === 'plank' && (
+        <View style={styles.repPanel}>
+          <Text style={styles.repCount}>{formatDuration(plankState.holdSeconds)}</Text>
+          <Text style={styles.stageLabel}>{plankState.isHolding ? 'HOLDING' : 'PAUSED'}</Text>
+          <Text style={styles.feedbackText}>{plankState.feedback}</Text>
+        </View>
+      )}
+      {exerciseId === 'situp' && (
+        <View style={styles.repPanel}>
+          <Text style={styles.repCount}>{situpState.counter}</Text>
+          <Text style={styles.stageLabel}>{situpState.stage ?? '—'}</Text>
+          <Text style={styles.feedbackText}>{situpState.feedback}</Text>
+        </View>
+      )}
       <View style={styles.debugBadge}>
         <Text style={styles.debugText}>
           {model
@@ -222,5 +322,33 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 20,
+  },
+  repPanel: {
+    position: 'absolute',
+    top: 60,
+    alignSelf: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 16,
+  },
+  repCount: {
+    color: '#fff',
+    fontSize: 48,
+    fontWeight: '800',
+  },
+  stageLabel: {
+    color: '#00E5FF',
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  feedbackText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+    marginTop: 6,
+    textAlign: 'center',
   },
 });
