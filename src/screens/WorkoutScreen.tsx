@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import {
   Camera,
   useCameraDevice,
@@ -9,6 +9,7 @@ import {
 import type { Frame } from 'react-native-vision-camera';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RouteProp } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NitroModules } from 'react-native-nitro-modules';
 import { useRunOnJS, useSharedValue } from 'react-native-worklets-core';
 import {
@@ -20,13 +21,41 @@ import { useResizePlugin } from 'vision-camera-resize-plugin';
 import type { TensorflowModel } from 'react-native-fast-tflite';
 import type { HomeStackParamList } from '../navigation/types';
 import { loadMoveNetModel } from '../services/moveNet';
-import { formatDuration } from '../data/exercises';
+import { useApp } from '../context/AppContext';
+import { EXERCISES, formatDuration, type WorkoutSession } from '../data/exercises';
+import { saveWorkout } from '../services/firebaseWorkout';
 import { INITIAL_SQUAT_STATE, SquatFsm, type SquatFsmState } from '../services/fsm/squatFsm';
 import { INITIAL_PUSHUP_STATE, PushupFsm, type PushupFsmState } from '../services/fsm/pushupFsm';
 import { INITIAL_LUNGE_STATE, LungeFsm, type LungeFsmState } from '../services/fsm/lungeFsm';
 import { INITIAL_PLANK_STATE, PlankFsm, type PlankFsmState } from '../services/fsm/plankFsm';
 import { INITIAL_SITUP_STATE, SitupFsm, type SitupFsmState } from '../services/fsm/situpFsm';
 import SkeletonOverlay, { CONF_THRESHOLD } from '../components/SkeletonOverlay';
+
+/** Pulls the exercise-specific (reps, score) pair out of whichever FSM is active. */
+function getFinalStats(
+  exerciseId: HomeStackParamList['Workout']['exerciseId'],
+  squatState: SquatFsmState,
+  pushupState: PushupFsmState,
+  lungeState: LungeFsmState,
+  plankState: PlankFsmState,
+  situpState: SitupFsmState
+): { reps: number; score: number } {
+  switch (exerciseId) {
+    case 'squat':
+      return { reps: squatState.counter, score: squatState.score };
+    case 'pushup':
+      return { reps: pushupState.counter, score: pushupState.score };
+    case 'lunge':
+      return { reps: lungeState.counter, score: lungeState.score };
+    case 'plank':
+      // Plank is time-based: hold-seconds doubles as both "reps" and score, matching the prototype.
+      return { reps: plankState.holdSeconds, score: plankState.holdSeconds };
+    case 'situp':
+      return { reps: situpState.counter, score: situpState.score };
+    default:
+      return { reps: 0, score: 0 };
+  }
+}
 
 // Tune: run inference every N frames. Inference itself (not this throttle) is the real
 // bottleneck — VisionCamera already drops frames it doesn't have time to process — so this
@@ -63,10 +92,12 @@ type Props = {
   route: RouteProp<HomeStackParamList, 'Workout'>;
 };
 
-export default function WorkoutScreen({ navigation: _navigation, route }: Props) {
+export default function WorkoutScreen({ navigation, route }: Props) {
   const { exerciseId } = route.params;
   const { width: previewWidth, height: previewHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const { hasPermission, requestPermission } = useCameraPermission();
+  const { addWorkoutSession } = useApp();
   const frontDevice = useCameraDevice('front');
   const backDevice = useCameraDevice('back');
   const device = frontDevice ?? backDevice;
@@ -93,8 +124,13 @@ export default function WorkoutScreen({ navigation: _navigation, route }: Props)
   const situpFsmRef = useRef(new SitupFsm());
   const [situpState, setSitupState] = useState<SitupFsmState>(INITIAL_SITUP_STATE);
 
-  // Reset the active exercise's FSM whenever the screen is entered or the exercise changes,
-  // so leftover state (counter, stage, smoothing buffers) from a prior session doesn't bleed in.
+  // Session bookkeeping: sessionStartRef marks when this exercise attempt began (for duration);
+  // hasSavedRef guards against saving twice (e.g. Finish button tap racing the unmount cleanup).
+  const sessionStartRef = useRef(Date.now());
+  const hasSavedRef = useRef(false);
+
+  // Reset the active exercise's FSM (and session bookkeeping) whenever the screen is entered or
+  // the exercise changes, so leftover state from a prior session doesn't bleed in.
   useEffect(() => {
     switch (exerciseId) {
       case 'squat':
@@ -118,7 +154,68 @@ export default function WorkoutScreen({ navigation: _navigation, route }: Props)
         setSitupState(INITIAL_SITUP_STATE);
         break;
     }
+    sessionStartRef.current = Date.now();
+    hasSavedRef.current = false;
   }, [exerciseId]);
+
+  // Kept in sync every render (a ref mutation during render is safe and avoids re-subscribing
+  // an effect on every FSM update) so the unmount cleanup below can always read the latest reps/score.
+  const finalStatsRef = useRef({ reps: 0, score: 0 });
+  finalStatsRef.current = getFinalStats(
+    exerciseId,
+    squatState,
+    pushupState,
+    lungeState,
+    plankState,
+    situpState
+  );
+
+  // Builds and saves the session exactly once (local history + Firebase). Returns the saved
+  // session so the Finish button can navigate to its summary; returns undefined if there was
+  // nothing worth saving (0 reps/score) or it was already saved.
+  const persistSession = useCallback((): WorkoutSession | undefined => {
+    if (hasSavedRef.current) return undefined;
+    const { reps, score } = finalStatsRef.current;
+    if (reps <= 0 && score <= 0) return undefined;
+    hasSavedRef.current = true;
+
+    const exercise = EXERCISES[exerciseId];
+    const duration = Math.floor((Date.now() - sessionStartRef.current) / 1000);
+    const session: WorkoutSession = {
+      id: Date.now().toString(),
+      exerciseId,
+      date: new Date().toISOString().split('T')[0],
+      reps,
+      duration,
+      score,
+      calories: Math.round(reps * exercise.calories),
+      formQuality:
+        score >= 90 ? 'Excellent' : score >= 75 ? 'Good' : score >= 60 ? 'Fair' : 'Needs Work',
+    };
+    addWorkoutSession(session);
+    saveWorkout(exerciseId.toUpperCase(), reps, score);
+    return session;
+  }, [exerciseId, addWorkoutSession]);
+
+  const handleFinish = useCallback(() => {
+    const session = persistSession();
+    if (session) {
+      navigation.replace('SessionSummary', { sessionId: session.id });
+    } else {
+      navigation.goBack();
+    }
+  }, [persistSession, navigation]);
+
+  // Save on unmount too (e.g. swipe-back / hardware back), so leaving the screen any other way
+  // than the Finish button still persists the session. Reads persistSession via a ref so this
+  // effect only needs to subscribe once, at mount, while always calling the latest closure.
+  const persistSessionRef = useRef(persistSession);
+  persistSessionRef.current = persistSession;
+  useEffect(() => {
+    return () => {
+      persistSessionRef.current();
+    };
+  }, []);
 
   useEffect(() => {
     requestPermission();
@@ -251,6 +348,12 @@ export default function WorkoutScreen({ navigation: _navigation, route }: Props)
         width={previewWidth}
         height={previewHeight}
       />
+      <TouchableOpacity
+        style={[styles.finishBtn, { top: insets.top + 12 }]}
+        onPress={handleFinish}
+      >
+        <Text style={styles.finishBtnText}>Finish</Text>
+      </TouchableOpacity>
       {exerciseId === 'squat' && (
         <View style={styles.repPanel}>
           <Text style={styles.repCount}>{squatState.counter}</Text>
@@ -309,6 +412,21 @@ const styles = StyleSheet.create({
     padding: 24,
   },
   text: { color: '#fff', fontSize: 16, textAlign: 'center' },
+  finishBtn: {
+    position: 'absolute',
+    right: 20,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  finishBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
   debugBadge: {
     position: 'absolute',
     bottom: 40,

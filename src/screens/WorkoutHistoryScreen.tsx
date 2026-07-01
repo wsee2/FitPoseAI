@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput,
+  View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -9,6 +9,7 @@ import { Colors, BorderRadius } from '../theme';
 import { ExerciseIcon } from '../components/ui/ExerciseIcon';
 import { useApp } from '../context/AppContext';
 import { EXERCISES, formatDuration, getScoreGrade, ExerciseId } from '../data/exercises';
+import { getHistory, type WorkoutRecord } from '../services/firebaseWorkout';
 import type { AnalyticsStackParamList } from '../navigation/types';
 
 type Props = { navigation: NativeStackNavigationProp<AnalyticsStackParamList, 'WorkoutHistory'> };
@@ -27,6 +28,17 @@ export default function WorkoutHistoryScreen({ navigation }: Props) {
   const insets = useSafeAreaInsets();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<ExerciseId | 'all'>('all');
+  const [cloudHistory, setCloudHistory] = useState<WorkoutRecord[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getHistory().then((records) => {
+      if (!cancelled) setCloudHistory(records);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filtered = workoutHistory.filter(s => {
     const ex = EXERCISES[s.exerciseId];
@@ -81,6 +93,34 @@ export default function WorkoutHistoryScreen({ navigation }: Props) {
             </TouchableOpacity>
           )}
         </View>
+      </View>
+
+      {/* Cloud sync */}
+      <View style={styles.cloudSection}>
+        <Text style={styles.cloudTitle}>Cloud Sync · Last 5</Text>
+        {cloudHistory === null ? (
+          <View style={styles.cloudLoading}>
+            <ActivityIndicator size="small" color={Colors.cyan} />
+          </View>
+        ) : cloudHistory.length === 0 ? (
+          <Text style={styles.cloudEmpty}>No cloud-synced workouts yet</Text>
+        ) : (
+          <View style={styles.cloudList}>
+            {[...cloudHistory].reverse().map((record, i) => (
+              <View
+                key={`${record.timestamp}-${i}`}
+                style={[
+                  styles.cloudRow,
+                  i < cloudHistory.length - 1 && styles.sessionCardBorderBottom,
+                ]}
+              >
+                <Text style={styles.cloudExercise}>{record.exercise}</Text>
+                <Text style={styles.cloudMeta}>{record.reps} reps · {record.score} pts</Text>
+                <Text style={styles.cloudTimestamp}>{record.timestamp}</Text>
+              </View>
+            ))}
+          </View>
+        )}
       </View>
 
       {/* Filters */}
@@ -172,6 +212,15 @@ const styles = StyleSheet.create({
   backText: { color: Colors.cyan, fontSize: 17, fontWeight: '600' },
   headerTitle: { flex: 1, fontSize: 20, fontWeight: '800', color: Colors.textPrimary },
   countBadge: { backgroundColor: Colors.cyanDim, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, color: Colors.cyan, fontSize: 13, fontWeight: '700' },
+  cloudSection: { paddingHorizontal: 20, marginBottom: 12 },
+  cloudTitle: { fontSize: 12, fontWeight: '700', color: Colors.textMuted, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 8 },
+  cloudLoading: { paddingVertical: 16, alignItems: 'center' },
+  cloudEmpty: { fontSize: 13, color: Colors.textMuted, paddingVertical: 8 },
+  cloudList: { backgroundColor: Colors.card, borderRadius: BorderRadius.xl, borderWidth: 1, borderColor: Colors.border, overflow: 'hidden' },
+  cloudRow: { paddingHorizontal: 14, paddingVertical: 10 },
+  cloudExercise: { fontSize: 14, fontWeight: '700', color: Colors.textPrimary, marginBottom: 2 },
+  cloudMeta: { fontSize: 12, color: Colors.textSecondary, marginBottom: 2 },
+  cloudTimestamp: { fontSize: 11, color: Colors.textMuted },
   searchWrapper: { paddingHorizontal: 20, marginBottom: 12 },
   searchContainer: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: Colors.card,
