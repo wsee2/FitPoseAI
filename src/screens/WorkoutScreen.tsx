@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { Animated, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import {
   Camera,
   useCameraDevice,
@@ -24,7 +24,7 @@ import { loadMoveNetModel } from '../services/moveNet';
 import { useApp } from '../context/AppContext';
 import { EXERCISES, formatDuration, type WorkoutSession } from '../data/exercises';
 import { saveWorkout } from '../services/firebaseWorkout';
-import { speakFeedback, reset as ttsReset } from '../services/ttsService';
+import { speakFeedback, speakImmediate, reset as ttsReset } from '../services/ttsService';
 import { INITIAL_SQUAT_STATE, SquatFsm, type SquatFsmState } from '../services/fsm/squatFsm';
 import { INITIAL_PUSHUP_STATE, PushupFsm, type PushupFsmState } from '../services/fsm/pushupFsm';
 import { INITIAL_LUNGE_STATE, LungeFsm, type LungeFsmState } from '../services/fsm/lungeFsm';
@@ -49,7 +49,6 @@ function getFinalStats(
     case 'lunge':
       return { reps: lungeState.counter, score: lungeState.score };
     case 'plank':
-      // Plank is time-based: hold-seconds doubles as both "reps" and score, matching the prototype.
       return { reps: plankState.holdSeconds, score: plankState.holdSeconds };
     case 'situp':
       return { reps: situpState.counter, score: situpState.score };
@@ -58,19 +57,9 @@ function getFinalStats(
   }
 }
 
-// Tune: run inference every N frames. Inference itself (not this throttle) is the real
-// bottleneck — VisionCamera already drops frames it doesn't have time to process — so this
-// is left at 1 to avoid adding an extra artificial frame-interval of latency on top.
 const INFER_EVERY_N_FRAMES = 1;
-
-// Short, FIXED glide just to remove single-frame "popping" — intentionally much shorter than
-// the typical inter-sample gap (~70-120ms) so it finishes and the overlay sits still at the
-// latest known position, rather than perpetually chasing. A duration close to or longer than
-// the real sample gap makes the overlay permanently trail behind by ~that long; this is the
-// trade-off knob between snappy (low value) and silky (high value, but adds visible lag).
 const SMOOTHING_MS = 50;
 
-// Returns counter-rotation degrees for the (constant) sensor-mounted frame orientation.
 function getCounterRotationDeg(orientation: Frame['orientation']): number {
   'worklet';
   switch (orientation) {
@@ -81,7 +70,6 @@ function getCounterRotationDeg(orientation: Frame['orientation']): number {
   }
 }
 
-// Maps total rotation degrees to the resize plugin's string format.
 function degreesToResizeRotation(deg: number): '0deg' | '90deg' | '180deg' | '270deg' {
   'worklet';
   switch (deg) {
@@ -92,35 +80,16 @@ function degreesToResizeRotation(deg: number): '0deg' | '90deg' | '180deg' | '27
   }
 }
 
-// Set true temporarily to log keypoint y-values for orientation debugging.
 const DEBUG = true;
 
 // ---------------------------------------------------------------------------
-// Landscape overlay transform config.
-// Derivation: in landscape the camera preview applies 180°CW + x-mirror to the
-// raw buffer; MoveNet gets the raw buffer (no rotation, totalDeg=0) for landscape-
-// left and 180°CW for landscape-right. Working through the math, both orientations
-// need the kp array's y and x slots flipped (display_y=1-y, display_x=1-x) so the
-// overlay formula cx=(1-display_x)*W cy=display_y*H maps to the preview position.
-//
-// If the skeleton is still misaligned after testing, change the constants:
-//   'flip_both': flip both y and x  — the theoretically correct default
-//   '90':        90°CCW  cx=(1-kp_y)*W  cy=(1-kp_x)*H
-//   '270':       90°CW   cx=kp_y*W      cy=kp_x*H
-//   '90_mirror': 90°CCW+mirror  cx=kp_y*W   cy=(1-kp_x)*H
-//   '270_mirror':90°CW+mirror   cx=(1-kp_y)*W cy=kp_x*H
+// Overlay display transform (for skeleton alignment, confirmed working values).
 type OverlayTransform = 'flip_both' | '90' | '270' | '90_mirror' | '270_mirror';
 
 const LANDSCAPE_LEFT_TRANSFORM: OverlayTransform = '90';
 const LANDSCAPE_RIGHT_TRANSFORM: OverlayTransform = '270';
 
-// FSM-input normalization: converts raw MoveNet keypoints into a consistent world-upright frame
-// so all direction-dependent FSM checks (y-axis comparisons like torso_elevated, arms_supporting)
-// work correctly regardless of device orientation.
-//   Portrait (0° / 180°): strict identity — squat/lunge portrait behavior is unchanged.
-//   Landscape: flip_both realigns +y = gravity (head-to-toe) for horizontal-pose exercises.
-// If a landscape case still misfires, change the constant for that orientation to '90' or '270'
-// (same option set as the overlay) and Metro-reload — no logic changes needed.
+// FSM-input normalization: realigns +y = gravity in all device orientations.
 const FSM_LANDSCAPE_LEFT_TRANSFORM: OverlayTransform = 'flip_both';
 const FSM_LANDSCAPE_RIGHT_TRANSFORM: OverlayTransform = 'flip_both';
 
@@ -138,6 +107,65 @@ function applyOverlayTransform(kp: number[], t: OverlayTransform): number[] {
     }
   }
   return d;
+}
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Calibration phase
+type WorkoutPhase = 'calibrating' | 'countdown' | 'active';
+
+// Keypoints that must ALL be visible and in-frame before the workout starts.
+const CALIB_REQUIRED_KPS = [0, 5, 6, 11, 12, 13, 14, 15, 16]; // nose, shoulders, hips, knees, ankles
+// Margin from edge: keypoints within [MARGIN, 1-MARGIN] are considered "in frame".
+const CALIB_FRAME_MARGIN = 0.05;
+// Consecutive valid frames required before triggering the countdown.
+const CALIB_STABLE_FRAMES = 8;
+// For upright exercises: ankleY - shoulderY must exceed this (world-upright fsmKp frame).
+const CALIB_UPRIGHT_SPREAD = 0.4;
+// For horizontal exercises: abs(shoulderY - ankleY) must be below this.
+const CALIB_HORIZONTAL_SPREAD = 0.25;
+// Exercises that require a horizontal body posture.
+const HORIZONTAL_EXERCISES = new Set(['pushup', 'plank']);
+
+/**
+ * Returns { valid, guidance } based on fsmKp (world-upright normalized keypoints).
+ * Called on every frame during 'calibrating' and 'countdown' phases.
+ */
+function checkCalibration(fsmKp: number[], exerciseId: string): { valid: boolean; guidance: string } {
+  // 1. All required keypoints above confidence threshold.
+  const allDetected = CALIB_REQUIRED_KPS.every((i) => (fsmKp[i * 3 + 2] ?? 0) >= CONF_THRESHOLD);
+  if (!allDetected) {
+    return { valid: false, guidance: 'Step into the frame' };
+  }
+
+  // 2. All required keypoints within frame margins (not clipped at edges).
+  const allInFrame = CALIB_REQUIRED_KPS.every((i) => {
+    const y = fsmKp[i * 3] ?? 0;
+    const x = fsmKp[i * 3 + 1] ?? 0;
+    return (
+      y >= CALIB_FRAME_MARGIN && y <= 1 - CALIB_FRAME_MARGIN &&
+      x >= CALIB_FRAME_MARGIN && x <= 1 - CALIB_FRAME_MARGIN
+    );
+  });
+  if (!allInFrame) {
+    return { valid: false, guidance: 'Move back — full body must be visible' };
+  }
+
+  // 3. Exercise-specific posture check using orientation-normalized coordinates.
+  const shoulderY = ((fsmKp[5 * 3] ?? 0) + (fsmKp[6 * 3] ?? 0)) / 2;
+  const ankleY   = ((fsmKp[15 * 3] ?? 0) + (fsmKp[16 * 3] ?? 0)) / 2;
+
+  if (HORIZONTAL_EXERCISES.has(exerciseId)) {
+    if (Math.abs(shoulderY - ankleY) >= CALIB_HORIZONTAL_SPREAD) {
+      return { valid: false, guidance: 'Get into position — body horizontal' };
+    }
+  } else {
+    if (ankleY - shoulderY <= CALIB_UPRIGHT_SPREAD) {
+      return { valid: false, guidance: 'Stand upright facing the camera' };
+    }
+  }
+
+  return { valid: true, guidance: 'Hold still...' };
 }
 // ---------------------------------------------------------------------------
 
@@ -162,16 +190,10 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const [inferenceMs, setInferenceMs] = useState<number | null>(null);
   const [resizeMs, setResizeMs] = useState<number | null>(null);
   const frameCount = useSharedValue(0);
-  // Physical device orientation as additional rotation degrees to compound with sensor correction.
-  // Initialized from current window dimensions so it's correct before any rotation event fires.
-  // Updated via Camera's onOutputOrientationChanged for precise landscape-left vs landscape-right.
   const deviceOrientationDeg = useSharedValue(isLandscape ? 90 : 0);
-  // Drives the overlay's animated render — interpolated toward each new sample
   const animatedKeypoints = useReanimatedValue<number[]>(new Array(51).fill(0));
 
-  // One FSM instance per exercise, all live for the screen's lifetime; trivial constructors
-  // so re-creating them on a hot-reload/re-render is harmless. Only the active exerciseId's
-  // FSM is fed frames and reset.
+  // FSM instances
   const squatFsmRef = useRef(new SquatFsm());
   const [squatState, setSquatState] = useState<SquatFsmState>(INITIAL_SQUAT_STATE);
   const pushupFsmRef = useRef(new PushupFsm());
@@ -183,14 +205,46 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const situpFsmRef = useRef(new SitupFsm());
   const [situpState, setSitupState] = useState<SitupFsmState>(INITIAL_SITUP_STATE);
 
-  // Session bookkeeping: sessionStartRef marks when this exercise attempt began (for duration);
-  // hasSavedRef guards against saving twice (e.g. Finish button tap racing the unmount cleanup).
+  // Session bookkeeping
   const sessionStartRef = useRef(Date.now());
   const hasSavedRef = useRef(false);
 
-  // Reset the active exercise's FSM (and session bookkeeping) whenever the screen is entered or
-  // the exercise changes, so leftover state from a prior session doesn't bleed in.
+  // ---------------------------------------------------------------------------
+  // Calibration phase state.
+  // phaseRef is kept in sync with phase state on every render so that the stable
+  // updateKeypoints closure can always read the latest phase without needing to be
+  // in the useRunOnJS dependency array.
+  const [phase, setPhase] = useState<WorkoutPhase>('calibrating');
+  const phaseRef = useRef<WorkoutPhase>('calibrating');
+  phaseRef.current = phase;
+
+  const [calibGuidance, setCalibGuidance] = useState('Step into the frame');
+  const calibGuidanceRef = useRef('Step into the frame'); // guards against duplicate setState calls
+
+  const [countdownNum, setCountdownNum] = useState(3);
+  const stableFramesRef = useRef(0);
+  const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Scale animation for the countdown digit.
+  const countdownScale = useRef(new Animated.Value(1)).current;
+  // ---------------------------------------------------------------------------
+
+  // Reset the active exercise's FSM (and calibration state) whenever the screen is entered.
   useEffect(() => {
+    // Reset calibration phase
+    phaseRef.current = 'calibrating';
+    setPhase('calibrating');
+    stableFramesRef.current = 0;
+    calibGuidanceRef.current = 'Step into the frame';
+    setCalibGuidance('Step into the frame');
+
+    // Clear any lingering countdown timer
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+
+    // Reset FSMs
     switch (exerciseId) {
       case 'squat':
         squatFsmRef.current.reset();
@@ -218,21 +272,63 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     ttsReset();
   }, [exerciseId]);
 
-  // Kept in sync every render (a ref mutation during render is safe and avoids re-subscribing
-  // an effect on every FSM update) so the unmount cleanup below can always read the latest reps/score.
+  // Countdown timer: fires when phase transitions to 'countdown'.
+  useEffect(() => {
+    if (phase !== 'countdown') return;
+
+    setCountdownNum(3);
+    Animated.sequence([
+      Animated.timing(countdownScale, { toValue: 1.4, duration: 150, useNativeDriver: true }),
+      Animated.timing(countdownScale, { toValue: 1,   duration: 300, useNativeDriver: true }),
+    ]).start();
+    speakImmediate('Three');
+
+    let count = 3;
+    const timer = setInterval(() => {
+      count -= 1;
+      if (count <= 0) {
+        clearInterval(timer);
+        countdownTimerRef.current = null;
+
+        speakImmediate('Go!');
+
+        // Reset FSM cleanly before the first counted rep.
+        switch (exerciseId) {
+          case 'squat':  squatFsmRef.current.reset();  setSquatState(INITIAL_SQUAT_STATE);   break;
+          case 'pushup': pushupFsmRef.current.reset(); setPushupState(INITIAL_PUSHUP_STATE); break;
+          case 'lunge':  lungeFsmRef.current.reset();  setLungeState(INITIAL_LUNGE_STATE);   break;
+          case 'plank':  plankFsmRef.current.reset();  setPlankState(INITIAL_PLANK_STATE);   break;
+          case 'situp':  situpFsmRef.current.reset();  setSitupState(INITIAL_SITUP_STATE);   break;
+        }
+        // Session timer starts NOW (not at screen mount, not during calibration).
+        sessionStartRef.current = Date.now();
+        hasSavedRef.current = false;
+        ttsReset();
+
+        phaseRef.current = 'active';
+        setPhase('active');
+      } else {
+        setCountdownNum(count);
+        Animated.sequence([
+          Animated.timing(countdownScale, { toValue: 1.4, duration: 150, useNativeDriver: true }),
+          Animated.timing(countdownScale, { toValue: 1,   duration: 300, useNativeDriver: true }),
+        ]).start();
+        speakImmediate(count === 2 ? 'Two' : 'One');
+      }
+    }, 1000);
+
+    countdownTimerRef.current = timer;
+    return () => {
+      clearInterval(timer);
+      countdownTimerRef.current = null;
+    };
+  }, [phase, exerciseId]);
+
   const finalStatsRef = useRef({ reps: 0, score: 0 });
   finalStatsRef.current = getFinalStats(
-    exerciseId,
-    squatState,
-    pushupState,
-    lungeState,
-    plankState,
-    situpState
+    exerciseId, squatState, pushupState, lungeState, plankState, situpState
   );
 
-  // Builds and saves the session exactly once (local history + Firebase). Returns the saved
-  // session so the Finish button can navigate to its summary; returns undefined if there was
-  // nothing worth saving (0 reps/score) or it was already saved.
   const persistSession = useCallback((): WorkoutSession | undefined => {
     if (hasSavedRef.current) return undefined;
     const { reps, score } = finalStatsRef.current;
@@ -266,9 +362,6 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     }
   }, [persistSession, navigation]);
 
-  // Save on unmount too (e.g. swipe-back / hardware back), so leaving the screen any other way
-  // than the Finish button still persists the session. Reads persistSession via a ref so this
-  // effect only needs to subscribe once, at mount, while always calling the latest closure.
   const persistSessionRef = useRef(persistSession);
   persistSessionRef.current = persistSession;
   useEffect(() => {
@@ -287,7 +380,6 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       .catch((err) => console.error('MoveNet load failed:', err));
   }, []);
 
-  // TfliteModel is a Nitro HybridObject — must be boxed before the worklet boundary
   const boxedModel = useMemo(
     () => (model != null ? NitroModules.box(model) : undefined),
     [model]
@@ -295,17 +387,17 @@ export default function WorkoutScreen({ navigation, route }: Props) {
 
   const { resize } = useResizePlugin();
 
-  // Bridge: called from worklet thread, runs on the JS/React thread.
-  // orientationDeg = deviceOrientationDeg.value at the time of the frame:
-  //   0=portrait, 90=landscape-left, 180=portrait-upside-down, 270=landscape-right.
-  // displayKp is a COPY used only for the overlay; FSMs always receive raw kp.
+  // Bridge: worklet thread → JS thread.
+  // orientationDeg = deviceOrientationDeg.value at frame time (0/90/180/270).
+  // Reads phaseRef.current (stable ref object) so this closure never needs re-creation
+  // for phase changes — only exerciseId changes recreate it.
   const updateKeypoints = useRunOnJS(
     (kp: number[], inferMs: number, resizeMsArg: number, orientationDeg: number) => {
       setKeypoints(kp);
       setInferenceMs(inferMs);
       setResizeMs(resizeMsArg);
 
-      // (a) Display copy — overlay transform only, portrait is identity.
+      // (a) Display copy — overlay transform, portrait = identity.
       let displayKp: number[];
       if (orientationDeg === 90) {
         displayKp = applyOverlayTransform(kp, LANDSCAPE_LEFT_TRANSFORM);
@@ -316,7 +408,6 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       }
 
       // (b) Analysis copy — FSM normalization so +y = gravity in every orientation.
-      //     Portrait (0 / 180) = strict identity; landscape = flip_both by default.
       let fsmKp: number[];
       if (orientationDeg === 90) {
         fsmKp = applyOverlayTransform(kp, FSM_LANDSCAPE_LEFT_TRANSFORM);
@@ -330,6 +421,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         duration: SMOOTHING_MS,
         easing: Easing.linear,
       });
+
       if (DEBUG) {
         const sy  = ((fsmKp[5 * 3] ?? 0) + (fsmKp[6 * 3] ?? 0)) / 2;
         const hy  = ((fsmKp[11 * 3] ?? 0) + (fsmKp[12 * 3] ?? 0)) / 2;
@@ -342,6 +434,59 @@ export default function WorkoutScreen({ navigation, route }: Props) {
           ` hDiff=${Math.abs(sy - hy).toFixed(3)} ely=${ely.toFixed(3)} wry=${wry.toFixed(3)} gap=${gap.toFixed(3)}`
         );
       }
+
+      // ---------------------------------------------------------------------------
+      // Phase-gated logic: FSMs only run during 'active'.
+      const currentPhase = phaseRef.current;
+
+      if (currentPhase === 'calibrating') {
+        const { valid, guidance } = checkCalibration(fsmKp, exerciseId);
+        if (valid) {
+          stableFramesRef.current += 1;
+          if (stableFramesRef.current >= CALIB_STABLE_FRAMES) {
+            // Enough stable frames — kick off countdown.
+            stableFramesRef.current = 0;
+            phaseRef.current = 'countdown';
+            setPhase('countdown');
+          } else {
+            // Show stabilizing guidance (only update state when text changes).
+            if (calibGuidanceRef.current !== 'Hold still...') {
+              calibGuidanceRef.current = 'Hold still...';
+              setCalibGuidance('Hold still...');
+            }
+            speakFeedback('Hold still');
+          }
+        } else {
+          stableFramesRef.current = 0;
+          if (calibGuidanceRef.current !== guidance) {
+            calibGuidanceRef.current = guidance;
+            setCalibGuidance(guidance);
+          }
+          speakFeedback(guidance);
+        }
+        return; // Never call FSMs during calibration.
+      }
+
+      if (currentPhase === 'countdown') {
+        // If the user steps out of frame during countdown, cancel it.
+        const { valid } = checkCalibration(fsmKp, exerciseId);
+        if (!valid) {
+          if (countdownTimerRef.current) {
+            clearInterval(countdownTimerRef.current);
+            countdownTimerRef.current = null;
+          }
+          stableFramesRef.current = 0;
+          const msg = 'Come back into the frame';
+          calibGuidanceRef.current = msg;
+          setCalibGuidance(msg);
+          phaseRef.current = 'calibrating';
+          setPhase('calibrating');
+          speakFeedback(msg);
+        }
+        return; // Never call FSMs during countdown.
+      }
+
+      // 'active' — existing FSM logic.
       switch (exerciseId) {
         case 'squat': {
           const s = squatFsmRef.current.update(fsmKp);
@@ -374,6 +519,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
           break;
         }
       }
+      // ---------------------------------------------------------------------------
     },
     [exerciseId]
   );
@@ -382,17 +528,12 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     (frame) => {
       'worklet';
 
-      // Throttle inference to every Nth frame for S8 performance
       frameCount.value += 1;
       if (frameCount.value % INFER_EVERY_N_FRAMES !== 0) return;
 
       if (boxedModel == null) return;
       const tflite = boxedModel.unbox();
 
-      // 1. Resize to 192×192 RGB uint8 (MoveNet Lightning INT8 input format).
-      //    frame.orientation is CONSTANT (VisionCamera never sets targetRotation for frame processors),
-      //    so getCounterRotationDeg gives the base sensor correction. deviceOrientationDeg.value adds
-      //    the physical device rotation so MoveNet always receives an upright-for-current-orientation frame.
       const baseDeg = getCounterRotationDeg(frame.orientation);
       const totalDeg = (baseDeg + deviceOrientationDeg.value) % 360;
       const rotation = degreesToResizeRotation(totalDeg);
@@ -405,44 +546,42 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       });
       const resizeElapsedMs = Date.now() - resizeStartedAt;
 
-      // 2. Slice exact bytes (TypedArray byteOffset can be non-zero in shared buffers)
       const inputBuffer = resized.buffer.slice(
         resized.byteOffset,
         resized.byteOffset + resized.byteLength
       ) as ArrayBuffer;
 
-      // 3. Synchronous inference (timed to surface real on-device latency)
       const inferStartedAt = Date.now();
       const outputs = tflite.runSync([inputBuffer]);
       const inferElapsedMs = Date.now() - inferStartedAt;
 
-      // 4. Output [1,1,17,3] = 51 floats: keypoint i → y=out[i*3], x=out[i*3+1], conf=out[i*3+2]
       const out = new Float32Array(outputs[0]!);
-
-      // Convert Float32Array → number[] before crossing the worklet→JS bridge.
-      // Pass orientation so updateKeypoints can apply the correct display transform.
       updateKeypoints(Array.from(out), inferElapsedMs, resizeElapsedMs, deviceOrientationDeg.value);
     },
     [boxedModel, frameCount, deviceOrientationDeg, resize, updateKeypoints]
   );
 
-  // Count how many keypoints are above the draw threshold (for debug display)
+  // Skeleton status: force 'guide' (cyan) during calibration/countdown.
+  let currentStatus: SkeletonStatus;
+  if (phase !== 'active') {
+    currentStatus = 'guide';
+  } else {
+    switch (exerciseId) {
+      case 'squat':  currentStatus = squatState.status;  break;
+      case 'pushup': currentStatus = pushupState.status; break;
+      case 'lunge':  currentStatus = lungeState.status;  break;
+      case 'plank':  currentStatus = plankState.status;  break;
+      case 'situp':  currentStatus = situpState.status;  break;
+      default:       currentStatus = 'guide';
+    }
+  }
+
   const trackedCount =
     keypoints.length >= 51
       ? Array.from({ length: 17 }, (_, i) => keypoints[i * 3 + 2]).filter(
           (c) => c >= CONF_THRESHOLD
         ).length
       : 0;
-
-  let currentStatus: SkeletonStatus;
-  switch (exerciseId) {
-    case 'squat':  currentStatus = squatState.status; break;
-    case 'pushup': currentStatus = pushupState.status; break;
-    case 'lunge':  currentStatus = lungeState.status; break;
-    case 'plank':  currentStatus = plankState.status; break;
-    case 'situp':  currentStatus = situpState.status; break;
-    default:       currentStatus = 'guide';
-  }
 
   const repPanelDynamicStyle = isLandscape
     ? { left: 12, top: Math.round(previewHeight * 0.3), alignSelf: 'flex-start' as const }
@@ -464,6 +603,9 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     );
   }
 
+  // Calibration panel position — bottom third of screen, above debug badge.
+  const calibPanelBottom = isLandscape ? 60 : 100;
+
   return (
     <View style={styles.container}>
       <Camera
@@ -473,7 +615,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         frameProcessor={frameProcessor}
         onOutputOrientationChanged={(orientation) => {
           switch (orientation) {
-            case 'landscape-left':       deviceOrientationDeg.value = 90; break;
+            case 'landscape-left':       deviceOrientationDeg.value = 90;  break;
             case 'portrait-upside-down': deviceOrientationDeg.value = 180; break;
             case 'landscape-right':      deviceOrientationDeg.value = 270; break;
             default:                     deviceOrientationDeg.value = 0;
@@ -481,58 +623,99 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         }}
         onError={(error) => console.warn('Camera error:', error.code, error.message)}
       />
+
+      {/* Skeleton overlay — always mounted, cyan during calibration/countdown */}
       <SkeletonOverlay
         keypoints={animatedKeypoints}
         status={currentStatus}
         width={previewWidth}
         height={previewHeight}
       />
+
+      {/* Finish button */}
       <TouchableOpacity
         style={[styles.finishBtn, { top: insets.top + 12 }]}
         onPress={handleFinish}
       >
         <Text style={styles.finishBtnText}>Finish</Text>
       </TouchableOpacity>
-      {exerciseId === 'squat' && (
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Calibration overlay — shown during 'calibrating' and 'countdown'   */}
+      {/* ------------------------------------------------------------------ */}
+      {phase === 'calibrating' && (
+        <View style={[styles.calibPanel, { bottom: calibPanelBottom }]}>
+          <Text style={styles.calibTitle}>CALIBRATING</Text>
+          <Text style={styles.calibGuidance}>{calibGuidance}</Text>
+          {stableFramesRef.current > 0 && (
+            <View style={styles.progressBar}>
+              <View
+                style={[
+                  styles.progressFill,
+                  { width: `${(stableFramesRef.current / CALIB_STABLE_FRAMES) * 100}%` },
+                ]}
+              />
+            </View>
+          )}
+        </View>
+      )}
+
+      {phase === 'countdown' && (
+        <View style={styles.countdownOverlay}>
+          <Animated.Text
+            style={[styles.countdownNum, { transform: [{ scale: countdownScale }] }]}
+          >
+            {countdownNum}
+          </Animated.Text>
+          <Text style={styles.countdownSub}>Get ready!</Text>
+        </View>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Active phase UI — rep/hold panels                                  */}
+      {/* ------------------------------------------------------------------ */}
+      {phase === 'active' && exerciseId === 'squat' && (
         <View style={[styles.repPanel, repPanelDynamicStyle]}>
           <Text style={styles.repCount}>{squatState.counter}</Text>
           <Text style={styles.stageLabel}>{squatState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{squatState.feedback}</Text>
         </View>
       )}
-      {exerciseId === 'pushup' && (
+      {phase === 'active' && exerciseId === 'pushup' && (
         <View style={[styles.repPanel, repPanelDynamicStyle]}>
           <Text style={styles.repCount}>{pushupState.counter}</Text>
           <Text style={styles.stageLabel}>{pushupState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{pushupState.feedback}</Text>
         </View>
       )}
-      {exerciseId === 'lunge' && (
+      {phase === 'active' && exerciseId === 'lunge' && (
         <View style={[styles.repPanel, repPanelDynamicStyle]}>
           <Text style={styles.repCount}>{lungeState.counter}</Text>
           <Text style={styles.stageLabel}>{lungeState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{lungeState.feedback}</Text>
         </View>
       )}
-      {exerciseId === 'plank' && (
+      {phase === 'active' && exerciseId === 'plank' && (
         <View style={[styles.repPanel, repPanelDynamicStyle]}>
           <Text style={styles.repCount}>{formatDuration(plankState.holdSeconds)}</Text>
           <Text style={styles.stageLabel}>{plankState.isHolding ? 'HOLDING' : 'PAUSED'}</Text>
           <Text style={styles.feedbackText}>{plankState.feedback}</Text>
         </View>
       )}
-      {exerciseId === 'situp' && (
+      {phase === 'active' && exerciseId === 'situp' && (
         <View style={[styles.repPanel, repPanelDynamicStyle]}>
           <Text style={styles.repCount}>{situpState.counter}</Text>
           <Text style={styles.stageLabel}>{situpState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{situpState.feedback}</Text>
         </View>
       )}
+
+      {/* Debug badge */}
       <View style={styles.debugBadge}>
         <Text style={styles.debugText}>
           {model
-            ? `Tracking ${trackedCount}/17${
-                inferenceMs != null ? `  •  ${resizeMs}ms resize + ${inferenceMs}ms infer` : ''
+            ? `${phase.toUpperCase()}  •  Tracking ${trackedCount}/17${
+                inferenceMs != null ? `  •  ${resizeMs}ms + ${inferenceMs}ms` : ''
               }`
             : '⏳ Loading model…'}
         </Text>
@@ -566,6 +749,67 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
   },
+  // Calibration panel
+  calibPanel: {
+    position: 'absolute',
+    alignSelf: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    paddingHorizontal: 28,
+    paddingVertical: 16,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#00E5FF',
+    minWidth: 240,
+  },
+  calibTitle: {
+    color: '#00E5FF',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 2,
+    marginBottom: 8,
+  },
+  calibGuidance: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  progressBar: {
+    marginTop: 12,
+    width: 160,
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#00E5FF',
+    borderRadius: 2,
+  },
+  // Countdown overlay
+  countdownOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  countdownNum: {
+    color: '#fff',
+    fontSize: 160,
+    fontWeight: '900',
+    textShadowColor: '#00E5FF',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 30,
+  },
+  countdownSub: {
+    color: '#00E5FF',
+    fontSize: 18,
+    fontWeight: '700',
+    letterSpacing: 3,
+    marginTop: -20,
+  },
+  // Active phase UI
   debugBadge: {
     position: 'absolute',
     bottom: 40,

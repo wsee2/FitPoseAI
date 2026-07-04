@@ -31,6 +31,18 @@ export function speakFeedback(feedback: string): void {
   }
 }
 
+/**
+ * Speak immediately, bypassing the anti-spam gate.
+ * Use for critical cues like countdown numbers where timing must be exact.
+ * Updates internal timing state so the gate honours this call for subsequent feedback.
+ */
+export function speakImmediate(text: string): void {
+  if (!enabled || !text) return;
+  Speech.speak(text, { rate: 1.1 });
+  lastSpoken = text;
+  lastAudioTime = Date.now() / 1000;
+}
+
 /** Call on exercise change / session start so stale "last spoken" state doesn't carry over. */
 export function reset(): void {
   lastSpoken = '';
