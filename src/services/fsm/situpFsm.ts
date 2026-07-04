@@ -31,6 +31,7 @@ export interface SitupFsmState {
   score: number;
   feedback: string;
   leanAngle: number | null;
+  status: 'good' | 'adjust' | 'error' | 'guide';
 }
 
 export const INITIAL_SITUP_STATE: SitupFsmState = {
@@ -39,6 +40,7 @@ export const INITIAL_SITUP_STATE: SitupFsmState = {
   score: 0,
   feedback: 'Get ready',
   leanAngle: null,
+  status: 'guide',
 };
 
 function midpoint(a: Keypoint, b: Keypoint): Keypoint {
@@ -132,12 +134,24 @@ export class SitupFsm {
       feedback = 'Keep curling up';
     }
 
+    let status: 'good' | 'adjust' | 'error' | 'guide';
+    if (this.stage === null) {
+      status = 'guide';
+    } else if (!feetOnFloor && smoothLean < FEET_PLANTED_LEAN_MAX) {
+      status = 'error';
+    } else if (smoothLean < LEAN_GREAT) {
+      status = 'good';
+    } else {
+      status = 'adjust';
+    }
+
     this.lastState = {
       stage: this.stage,
       counter: this.counter,
       score: this.score,
       feedback,
       leanAngle: smoothLean,
+      status,
     };
     return this.lastState;
   }

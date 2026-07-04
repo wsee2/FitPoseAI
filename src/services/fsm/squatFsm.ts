@@ -34,6 +34,7 @@ export interface SquatFsmState {
   score: number;
   feedback: string;
   kneeAngle: number | null;
+  status: 'good' | 'adjust' | 'error' | 'guide';
 }
 
 export const INITIAL_SQUAT_STATE: SquatFsmState = {
@@ -42,6 +43,7 @@ export const INITIAL_SQUAT_STATE: SquatFsmState = {
   score: 0,
   feedback: 'Get ready',
   kneeAngle: null,
+  status: 'guide',
 };
 
 export class SquatFsm {
@@ -129,12 +131,24 @@ export class SquatFsm {
       feedback = 'Keep Going Down';
     }
 
+    let status: 'good' | 'adjust' | 'error' | 'guide';
+    if (this.stage === null) {
+      status = 'guide';
+    } else if (footDiff > FOOT_DIFF_BAD || excessiveLean || (kneeSym > KNEE_SYM_BAD && angle < 155) || angle < TOO_LOW_ANGLE) {
+      status = 'error';
+    } else if (angle >= PERFECT_MIN && angle <= PERFECT_MAX) {
+      status = 'good';
+    } else {
+      status = 'adjust';
+    }
+
     this.lastState = {
       stage: this.stage,
       counter: this.counter,
       score: this.score,
       feedback,
       kneeAngle: angle,
+      status,
     };
     return this.lastState;
   }

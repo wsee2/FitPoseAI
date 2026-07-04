@@ -3,7 +3,7 @@
     "name": "FitPose AI",
     "slug": "fitpose-ai",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,

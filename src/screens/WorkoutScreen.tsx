@@ -24,12 +24,13 @@ import { loadMoveNetModel } from '../services/moveNet';
 import { useApp } from '../context/AppContext';
 import { EXERCISES, formatDuration, type WorkoutSession } from '../data/exercises';
 import { saveWorkout } from '../services/firebaseWorkout';
+import { speakFeedback, reset as ttsReset } from '../services/ttsService';
 import { INITIAL_SQUAT_STATE, SquatFsm, type SquatFsmState } from '../services/fsm/squatFsm';
 import { INITIAL_PUSHUP_STATE, PushupFsm, type PushupFsmState } from '../services/fsm/pushupFsm';
 import { INITIAL_LUNGE_STATE, LungeFsm, type LungeFsmState } from '../services/fsm/lungeFsm';
 import { INITIAL_PLANK_STATE, PlankFsm, type PlankFsmState } from '../services/fsm/plankFsm';
 import { INITIAL_SITUP_STATE, SitupFsm, type SitupFsmState } from '../services/fsm/situpFsm';
-import SkeletonOverlay, { CONF_THRESHOLD } from '../components/SkeletonOverlay';
+import SkeletonOverlay, { CONF_THRESHOLD, type SkeletonStatus } from '../components/SkeletonOverlay';
 
 /** Pulls the exercise-specific (reps, score) pair out of whichever FSM is active. */
 function getFinalStats(
@@ -69,23 +70,76 @@ const INFER_EVERY_N_FRAMES = 1;
 // trade-off knob between snappy (low value) and silky (high value, but adds visible lag).
 const SMOOTHING_MS = 50;
 
-// frame.orientation tells us how far the raw sensor buffer (e.g. 640x480 landscape)
-// is rotated relative to upright. Counter-rotate by the inverse so the buffer we feed
-// MoveNet — and therefore its normalized x/y output — is upright and matches the portrait screen.
-function getCounterRotation(orientation: Frame['orientation']): '0deg' | '90deg' | '180deg' | '270deg' {
+// Returns counter-rotation degrees for the (constant) sensor-mounted frame orientation.
+function getCounterRotationDeg(orientation: Frame['orientation']): number {
   'worklet';
   switch (orientation) {
-    case 'landscape-left':
-      return '270deg';
-    case 'portrait-upside-down':
-      return '180deg';
-    case 'landscape-right':
-      return '90deg';
-    case 'portrait':
-    default:
-      return '0deg';
+    case 'landscape-left':       return 270;
+    case 'portrait-upside-down': return 180;
+    case 'landscape-right':      return 90;
+    default:                     return 0;
   }
 }
+
+// Maps total rotation degrees to the resize plugin's string format.
+function degreesToResizeRotation(deg: number): '0deg' | '90deg' | '180deg' | '270deg' {
+  'worklet';
+  switch (deg) {
+    case 90:  return '90deg';
+    case 180: return '180deg';
+    case 270: return '270deg';
+    default:  return '0deg';
+  }
+}
+
+// Set true temporarily to log keypoint y-values for orientation debugging.
+const DEBUG = true;
+
+// ---------------------------------------------------------------------------
+// Landscape overlay transform config.
+// Derivation: in landscape the camera preview applies 180°CW + x-mirror to the
+// raw buffer; MoveNet gets the raw buffer (no rotation, totalDeg=0) for landscape-
+// left and 180°CW for landscape-right. Working through the math, both orientations
+// need the kp array's y and x slots flipped (display_y=1-y, display_x=1-x) so the
+// overlay formula cx=(1-display_x)*W cy=display_y*H maps to the preview position.
+//
+// If the skeleton is still misaligned after testing, change the constants:
+//   'flip_both': flip both y and x  — the theoretically correct default
+//   '90':        90°CCW  cx=(1-kp_y)*W  cy=(1-kp_x)*H
+//   '270':       90°CW   cx=kp_y*W      cy=kp_x*H
+//   '90_mirror': 90°CCW+mirror  cx=kp_y*W   cy=(1-kp_x)*H
+//   '270_mirror':90°CW+mirror   cx=(1-kp_y)*W cy=kp_x*H
+type OverlayTransform = 'flip_both' | '90' | '270' | '90_mirror' | '270_mirror';
+
+const LANDSCAPE_LEFT_TRANSFORM: OverlayTransform = '90';
+const LANDSCAPE_RIGHT_TRANSFORM: OverlayTransform = '270';
+
+// FSM-input normalization: converts raw MoveNet keypoints into a consistent world-upright frame
+// so all direction-dependent FSM checks (y-axis comparisons like torso_elevated, arms_supporting)
+// work correctly regardless of device orientation.
+//   Portrait (0° / 180°): strict identity — squat/lunge portrait behavior is unchanged.
+//   Landscape: flip_both realigns +y = gravity (head-to-toe) for horizontal-pose exercises.
+// If a landscape case still misfires, change the constant for that orientation to '90' or '270'
+// (same option set as the overlay) and Metro-reload — no logic changes needed.
+const FSM_LANDSCAPE_LEFT_TRANSFORM: OverlayTransform = 'flip_both';
+const FSM_LANDSCAPE_RIGHT_TRANSFORM: OverlayTransform = 'flip_both';
+
+function applyOverlayTransform(kp: number[], t: OverlayTransform): number[] {
+  const d = kp.slice();
+  for (let i = 0; i < 17; i++) {
+    const ky = kp[i * 3]!;
+    const kx = kp[i * 3 + 1]!;
+    switch (t) {
+      case 'flip_both':  d[i*3]=1-ky; d[i*3+1]=1-kx; break;
+      case '90':         d[i*3]=1-kx; d[i*3+1]=ky;   break;
+      case '270':        d[i*3]=kx;   d[i*3+1]=1-ky; break;
+      case '90_mirror':  d[i*3]=1-kx; d[i*3+1]=1-ky; break;
+      case '270_mirror': d[i*3]=kx;   d[i*3+1]=ky;   break;
+    }
+  }
+  return d;
+}
+// ---------------------------------------------------------------------------
 
 type Props = {
   navigation: NativeStackNavigationProp<HomeStackParamList, 'Workout'>;
@@ -95,6 +149,7 @@ type Props = {
 export default function WorkoutScreen({ navigation, route }: Props) {
   const { exerciseId } = route.params;
   const { width: previewWidth, height: previewHeight } = useWindowDimensions();
+  const isLandscape = previewWidth > previewHeight;
   const insets = useSafeAreaInsets();
   const { hasPermission, requestPermission } = useCameraPermission();
   const { addWorkoutSession } = useApp();
@@ -107,6 +162,10 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const [inferenceMs, setInferenceMs] = useState<number | null>(null);
   const [resizeMs, setResizeMs] = useState<number | null>(null);
   const frameCount = useSharedValue(0);
+  // Physical device orientation as additional rotation degrees to compound with sensor correction.
+  // Initialized from current window dimensions so it's correct before any rotation event fires.
+  // Updated via Camera's onOutputOrientationChanged for precise landscape-left vs landscape-right.
+  const deviceOrientationDeg = useSharedValue(isLandscape ? 90 : 0);
   // Drives the overlay's animated render — interpolated toward each new sample
   const animatedKeypoints = useReanimatedValue<number[]>(new Array(51).fill(0));
 
@@ -156,6 +215,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     }
     sessionStartRef.current = Date.now();
     hasSavedRef.current = false;
+    ttsReset();
   }, [exerciseId]);
 
   // Kept in sync every render (a ref mutation during render is safe and avoids re-subscribing
@@ -235,32 +295,84 @@ export default function WorkoutScreen({ navigation, route }: Props) {
 
   const { resize } = useResizePlugin();
 
-  // Bridge: called from worklet thread, runs setKeypoints on the JS/React thread
+  // Bridge: called from worklet thread, runs on the JS/React thread.
+  // orientationDeg = deviceOrientationDeg.value at the time of the frame:
+  //   0=portrait, 90=landscape-left, 180=portrait-upside-down, 270=landscape-right.
+  // displayKp is a COPY used only for the overlay; FSMs always receive raw kp.
   const updateKeypoints = useRunOnJS(
-    (kp: number[], inferMs: number, resizeMsArg: number) => {
+    (kp: number[], inferMs: number, resizeMsArg: number, orientationDeg: number) => {
       setKeypoints(kp);
       setInferenceMs(inferMs);
       setResizeMs(resizeMsArg);
-      animatedKeypoints.value = withTiming(kp, {
+
+      // (a) Display copy — overlay transform only, portrait is identity.
+      let displayKp: number[];
+      if (orientationDeg === 90) {
+        displayKp = applyOverlayTransform(kp, LANDSCAPE_LEFT_TRANSFORM);
+      } else if (orientationDeg === 270) {
+        displayKp = applyOverlayTransform(kp, LANDSCAPE_RIGHT_TRANSFORM);
+      } else {
+        displayKp = kp;
+      }
+
+      // (b) Analysis copy — FSM normalization so +y = gravity in every orientation.
+      //     Portrait (0 / 180) = strict identity; landscape = flip_both by default.
+      let fsmKp: number[];
+      if (orientationDeg === 90) {
+        fsmKp = applyOverlayTransform(kp, FSM_LANDSCAPE_LEFT_TRANSFORM);
+      } else if (orientationDeg === 270) {
+        fsmKp = applyOverlayTransform(kp, FSM_LANDSCAPE_RIGHT_TRANSFORM);
+      } else {
+        fsmKp = kp;
+      }
+
+      animatedKeypoints.value = withTiming(displayKp, {
         duration: SMOOTHING_MS,
         easing: Easing.linear,
       });
+      if (DEBUG) {
+        const sy  = ((fsmKp[5 * 3] ?? 0) + (fsmKp[6 * 3] ?? 0)) / 2;
+        const hy  = ((fsmKp[11 * 3] ?? 0) + (fsmKp[12 * 3] ?? 0)) / 2;
+        const ay  = ((fsmKp[15 * 3] ?? 0) + (fsmKp[16 * 3] ?? 0)) / 2;
+        const ely = ((fsmKp[7 * 3] ?? 0) + (fsmKp[8 * 3] ?? 0)) / 2;
+        const wry = ((fsmKp[9 * 3] ?? 0) + (fsmKp[10 * 3] ?? 0)) / 2;
+        const gap = Math.max(ely, wry) - sy;
+        console.log(
+          `[POSE] ori=${orientationDeg} sy=${sy.toFixed(3)} hy=${hy.toFixed(3)} ay=${ay.toFixed(3)}` +
+          ` hDiff=${Math.abs(sy - hy).toFixed(3)} ely=${ely.toFixed(3)} wry=${wry.toFixed(3)} gap=${gap.toFixed(3)}`
+        );
+      }
       switch (exerciseId) {
-        case 'squat':
-          setSquatState(squatFsmRef.current.update(kp));
+        case 'squat': {
+          const s = squatFsmRef.current.update(fsmKp);
+          setSquatState(s);
+          speakFeedback(s.feedback);
           break;
-        case 'pushup':
-          setPushupState(pushupFsmRef.current.update(kp));
+        }
+        case 'pushup': {
+          const s = pushupFsmRef.current.update(fsmKp);
+          setPushupState(s);
+          speakFeedback(s.feedback);
           break;
-        case 'lunge':
-          setLungeState(lungeFsmRef.current.update(kp));
+        }
+        case 'lunge': {
+          const s = lungeFsmRef.current.update(fsmKp);
+          setLungeState(s);
+          speakFeedback(s.feedback);
           break;
-        case 'plank':
-          setPlankState(plankFsmRef.current.update(kp));
+        }
+        case 'plank': {
+          const s = plankFsmRef.current.update(fsmKp);
+          setPlankState(s);
+          speakFeedback(s.feedback);
           break;
-        case 'situp':
-          setSitupState(situpFsmRef.current.update(kp));
+        }
+        case 'situp': {
+          const s = situpFsmRef.current.update(fsmKp);
+          setSitupState(s);
+          speakFeedback(s.feedback);
           break;
+        }
       }
     },
     [exerciseId]
@@ -277,10 +389,13 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       if (boxedModel == null) return;
       const tflite = boxedModel.unbox();
 
-      // 1. Resize to 192×192 RGB uint8 (MoveNet Lightning INT8 input format),
-      //    counter-rotating so the buffer MoveNet sees is upright regardless of sensor mounting.
-      //    Timed separately from inference since this step's cost was previously invisible.
-      const rotation = getCounterRotation(frame.orientation);
+      // 1. Resize to 192×192 RGB uint8 (MoveNet Lightning INT8 input format).
+      //    frame.orientation is CONSTANT (VisionCamera never sets targetRotation for frame processors),
+      //    so getCounterRotationDeg gives the base sensor correction. deviceOrientationDeg.value adds
+      //    the physical device rotation so MoveNet always receives an upright-for-current-orientation frame.
+      const baseDeg = getCounterRotationDeg(frame.orientation);
+      const totalDeg = (baseDeg + deviceOrientationDeg.value) % 360;
+      const rotation = degreesToResizeRotation(totalDeg);
       const resizeStartedAt = Date.now();
       const resized = resize(frame, {
         scale: { width: 192, height: 192 },
@@ -304,10 +419,11 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       // 4. Output [1,1,17,3] = 51 floats: keypoint i → y=out[i*3], x=out[i*3+1], conf=out[i*3+2]
       const out = new Float32Array(outputs[0]!);
 
-      // Convert Float32Array → number[] before crossing the worklet→JS bridge
-      updateKeypoints(Array.from(out), inferElapsedMs, resizeElapsedMs);
+      // Convert Float32Array → number[] before crossing the worklet→JS bridge.
+      // Pass orientation so updateKeypoints can apply the correct display transform.
+      updateKeypoints(Array.from(out), inferElapsedMs, resizeElapsedMs, deviceOrientationDeg.value);
     },
-    [boxedModel, frameCount, resize, updateKeypoints]
+    [boxedModel, frameCount, deviceOrientationDeg, resize, updateKeypoints]
   );
 
   // Count how many keypoints are above the draw threshold (for debug display)
@@ -317,6 +433,20 @@ export default function WorkoutScreen({ navigation, route }: Props) {
           (c) => c >= CONF_THRESHOLD
         ).length
       : 0;
+
+  let currentStatus: SkeletonStatus;
+  switch (exerciseId) {
+    case 'squat':  currentStatus = squatState.status; break;
+    case 'pushup': currentStatus = pushupState.status; break;
+    case 'lunge':  currentStatus = lungeState.status; break;
+    case 'plank':  currentStatus = plankState.status; break;
+    case 'situp':  currentStatus = situpState.status; break;
+    default:       currentStatus = 'guide';
+  }
+
+  const repPanelDynamicStyle = isLandscape
+    ? { left: 12, top: Math.round(previewHeight * 0.3), alignSelf: 'flex-start' as const }
+    : { top: insets.top + 50, alignSelf: 'center' as const };
 
   if (!hasPermission) {
     return (
@@ -341,10 +471,19 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         device={device}
         isActive={true}
         frameProcessor={frameProcessor}
+        onOutputOrientationChanged={(orientation) => {
+          switch (orientation) {
+            case 'landscape-left':       deviceOrientationDeg.value = 90; break;
+            case 'portrait-upside-down': deviceOrientationDeg.value = 180; break;
+            case 'landscape-right':      deviceOrientationDeg.value = 270; break;
+            default:                     deviceOrientationDeg.value = 0;
+          }
+        }}
         onError={(error) => console.warn('Camera error:', error.code, error.message)}
       />
       <SkeletonOverlay
         keypoints={animatedKeypoints}
+        status={currentStatus}
         width={previewWidth}
         height={previewHeight}
       />
@@ -355,35 +494,35 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         <Text style={styles.finishBtnText}>Finish</Text>
       </TouchableOpacity>
       {exerciseId === 'squat' && (
-        <View style={styles.repPanel}>
+        <View style={[styles.repPanel, repPanelDynamicStyle]}>
           <Text style={styles.repCount}>{squatState.counter}</Text>
           <Text style={styles.stageLabel}>{squatState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{squatState.feedback}</Text>
         </View>
       )}
       {exerciseId === 'pushup' && (
-        <View style={styles.repPanel}>
+        <View style={[styles.repPanel, repPanelDynamicStyle]}>
           <Text style={styles.repCount}>{pushupState.counter}</Text>
           <Text style={styles.stageLabel}>{pushupState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{pushupState.feedback}</Text>
         </View>
       )}
       {exerciseId === 'lunge' && (
-        <View style={styles.repPanel}>
+        <View style={[styles.repPanel, repPanelDynamicStyle]}>
           <Text style={styles.repCount}>{lungeState.counter}</Text>
           <Text style={styles.stageLabel}>{lungeState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{lungeState.feedback}</Text>
         </View>
       )}
       {exerciseId === 'plank' && (
-        <View style={styles.repPanel}>
+        <View style={[styles.repPanel, repPanelDynamicStyle]}>
           <Text style={styles.repCount}>{formatDuration(plankState.holdSeconds)}</Text>
           <Text style={styles.stageLabel}>{plankState.isHolding ? 'HOLDING' : 'PAUSED'}</Text>
           <Text style={styles.feedbackText}>{plankState.feedback}</Text>
         </View>
       )}
       {exerciseId === 'situp' && (
-        <View style={styles.repPanel}>
+        <View style={[styles.repPanel, repPanelDynamicStyle]}>
           <Text style={styles.repCount}>{situpState.counter}</Text>
           <Text style={styles.stageLabel}>{situpState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{situpState.feedback}</Text>
@@ -443,8 +582,6 @@ const styles = StyleSheet.create({
   },
   repPanel: {
     position: 'absolute',
-    top: 60,
-    alignSelf: 'center',
     alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.6)',
     paddingHorizontal: 24,

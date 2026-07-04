@@ -32,6 +32,7 @@ export interface PushupFsmState {
   score: number;
   feedback: string;
   elbowAngle: number | null;
+  status: 'good' | 'adjust' | 'error' | 'guide';
 }
 
 export const INITIAL_PUSHUP_STATE: PushupFsmState = {
@@ -40,6 +41,7 @@ export const INITIAL_PUSHUP_STATE: PushupFsmState = {
   score: 0,
   feedback: 'Get ready',
   elbowAngle: null,
+  status: 'guide',
 };
 
 function midpoint(a: Keypoint, b: Keypoint): Keypoint {
@@ -147,12 +149,26 @@ export class PushupFsm {
       feedback = 'Keep Going Down';
     }
 
+    let status: 'good' | 'adjust' | 'error' | 'guide';
+    if (this.stage === null) {
+      status = 'guide';
+    } else if (!bodyLevel || !bodyStraight || elbowAngle < ELBOW_TOO_LOW_ANGLE) {
+      status = 'error';
+    } else if (!armsSupporting && this.stage !== 'DOWN') {
+      status = 'guide';
+    } else if (elbowAngle >= PERFECT_MIN && elbowAngle <= PERFECT_MAX) {
+      status = 'good';
+    } else {
+      status = 'adjust';
+    }
+
     this.lastState = {
       stage: this.stage,
       counter: this.counter,
       score: this.score,
       feedback,
       elbowAngle,
+      status,
     };
     return this.lastState;
   }

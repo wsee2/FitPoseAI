@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { setEnabled as ttsSetEnabled } from '../services/ttsService';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert,
 } from 'react-native';
@@ -79,7 +80,7 @@ export default function SettingsScreen({ navigation }: Props) {
     {
       title: 'Audio & Haptics',
       rows: [
-        { id: 'voice_coaching', label: 'Voice Coaching', subtitle: 'AI coach feedback during workouts', icon: '🔊', type: 'toggle', value: voiceEnabled, onToggle: setVoiceEnabled },
+        { id: 'voice_coaching', label: 'Voice Coaching', subtitle: 'AI coach feedback during workouts', icon: '🔊', type: 'toggle', value: voiceEnabled, onToggle: (v: boolean) => { setVoiceEnabled(v); ttsSetEnabled(v); } },
         { id: 'haptics_setting', label: 'Haptic Feedback', subtitle: 'Vibration on reps and feedback', icon: '📳', type: 'toggle', value: haptics, onToggle: setHaptics },
       ],
     },

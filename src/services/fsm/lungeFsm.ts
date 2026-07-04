@@ -34,6 +34,7 @@ export interface LungeFsmState {
   score: number;
   feedback: string;
   frontKneeAngle: number | null;
+  status: 'good' | 'adjust' | 'error' | 'guide';
 }
 
 export const INITIAL_LUNGE_STATE: LungeFsmState = {
@@ -42,6 +43,7 @@ export const INITIAL_LUNGE_STATE: LungeFsmState = {
   score: 0,
   feedback: 'Get ready',
   frontKneeAngle: null,
+  status: 'guide',
 };
 
 export class LungeFsm {
@@ -134,12 +136,24 @@ export class LungeFsm {
       feedback = 'Keep Going Down';
     }
 
+    let status: 'good' | 'adjust' | 'error' | 'guide';
+    if (this.stage === null) {
+      status = 'guide';
+    } else if (lean > LEAN_BAD || (!bothFeetGrounded && lungeAttempt) || (!backKneeActive && lungeAttempt) || frontKnee < TOO_LOW_ANGLE) {
+      status = 'error';
+    } else if (frontKnee >= PERFECT_MIN && frontKnee <= PERFECT_MAX) {
+      status = 'good';
+    } else {
+      status = 'adjust';
+    }
+
     this.lastState = {
       stage: this.stage,
       counter: this.counter,
       score: this.score,
       feedback,
       frontKneeAngle: frontKnee,
+      status,
     };
     return this.lastState;
   }

@@ -10,6 +10,16 @@ export const CONF_THRESHOLD = 0.3;
 // If the skeleton appears left-right inverted relative to your body, toggle this to false.
 export const MIRROR_X = true;
 
+export type SkeletonStatus = 'good' | 'adjust' | 'error' | 'guide';
+
+// GREEN = good form, ORANGE = minor deviation, RED = critical error, CYAN = instructional/guide
+export const STATUS_COLORS: Record<SkeletonStatus, string> = {
+  good: '#00FF88',
+  adjust: '#FF8C00',
+  error: '#FF3B3B',
+  guide: '#00E5FF',
+};
+
 // COCO skeleton bone pairs [from_keypoint_index, to_keypoint_index]
 const SKELETON_PAIRS: [number, number][] = [
   [5, 6],   // shoulders
@@ -34,11 +44,12 @@ interface DotProps {
   index: number;
   width: number;
   height: number;
+  color: string;
 }
 
 // Always mounted; opacity is animated to 0 below the confidence threshold instead of
 // unmounting, so dots fade rather than pop, and so useAnimatedProps' hook count stays fixed.
-function KeypointDot({ keypoints, index, width, height }: DotProps) {
+function KeypointDot({ keypoints, index, width, height, color }: DotProps) {
   const animatedProps = useAnimatedProps(() => {
     'worklet';
     const kp = keypoints.value;
@@ -52,7 +63,7 @@ function KeypointDot({ keypoints, index, width, height }: DotProps) {
     };
   });
 
-  return <AnimatedCircle r={6} fill="#00E5FF" animatedProps={animatedProps} />;
+  return <AnimatedCircle r={6} fill={color} animatedProps={animatedProps} />;
 }
 
 interface BoneProps {
@@ -61,9 +72,10 @@ interface BoneProps {
   to: number;
   width: number;
   height: number;
+  color: string;
 }
 
-function BoneLine({ keypoints, from, to, width, height }: BoneProps) {
+function BoneLine({ keypoints, from, to, width, height, color }: BoneProps) {
   const animatedProps = useAnimatedProps(() => {
     'worklet';
     const kp = keypoints.value;
@@ -83,7 +95,7 @@ function BoneLine({ keypoints, from, to, width, height }: BoneProps) {
     };
   });
 
-  return <AnimatedLine stroke="#00E5FF" strokeWidth={2.5} animatedProps={animatedProps} />;
+  return <AnimatedLine stroke={color} strokeWidth={2.5} animatedProps={animatedProps} />;
 }
 
 interface Props {
@@ -91,9 +103,11 @@ interface Props {
   keypoints: SharedValue<number[]>;
   width: number;
   height: number;
+  status: SkeletonStatus;
 }
 
-export default function SkeletonOverlay({ keypoints, width, height }: Props) {
+export default function SkeletonOverlay({ keypoints, width, height, status }: Props) {
+  const color = STATUS_COLORS[status];
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
       <Svg width={width} height={height}>
@@ -105,6 +119,7 @@ export default function SkeletonOverlay({ keypoints, width, height }: Props) {
             to={b}
             width={width}
             height={height}
+            color={color}
           />
         ))}
         {Array.from({ length: 17 }, (_, i) => (
@@ -114,6 +129,7 @@ export default function SkeletonOverlay({ keypoints, width, height }: Props) {
             index={i}
             width={width}
             height={height}
+            color={color}
           />
         ))}
       </Svg>

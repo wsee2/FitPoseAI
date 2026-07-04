@@ -31,6 +31,7 @@ export interface PlankFsmState {
   isHolding: boolean;
   feedback: string;
   bodyAngle: number | null;
+  status: 'good' | 'adjust' | 'error' | 'guide';
 }
 
 export const INITIAL_PLANK_STATE: PlankFsmState = {
@@ -38,6 +39,7 @@ export const INITIAL_PLANK_STATE: PlankFsmState = {
   isHolding: false,
   feedback: 'Get ready',
   bodyAngle: null,
+  status: 'guide',
 };
 
 function midpoint(a: Keypoint, b: Keypoint): Keypoint {
@@ -118,6 +120,8 @@ export class PlankFsm {
     const severeBad =
       !torsoElevated || !legsStraight || bodyAngle < SEVERE_BODY_ANGLE || !bodyLevel;
 
+    const neverStarted = this.plankHoldTime === 0 && this.plankStartTime === null;
+
     const now = Date.now() / 1000;
     let totalHold: number;
     if (goodPlank) {
@@ -162,11 +166,23 @@ export class PlankFsm {
       feedback = 'Hold the plank';
     }
 
+    let status: 'good' | 'adjust' | 'error' | 'guide';
+    if (neverStarted && !goodPlank) {
+      status = 'guide';
+    } else if (goodPlank) {
+      status = 'good';
+    } else if (severeBad) {
+      status = 'error';
+    } else {
+      status = 'adjust';
+    }
+
     this.lastState = {
       holdSeconds: Math.floor(totalHold),
       isHolding: this.plankStartTime !== null,
       feedback,
       bodyAngle,
+      status,
     };
     return this.lastState;
   }
