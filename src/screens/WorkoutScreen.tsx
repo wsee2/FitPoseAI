@@ -22,6 +22,7 @@ import type { TensorflowModel } from 'react-native-fast-tflite';
 import type { HomeStackParamList } from '../navigation/types';
 import { loadMoveNetModel } from '../services/moveNet';
 import { useApp } from '../context/AppContext';
+import { getSessionEndMessage } from '../services/aiCoach';
 import { EXERCISES, formatDuration, type WorkoutSession } from '../data/exercises';
 
 import { speakFeedback, speakImmediate, reset as ttsReset } from '../services/ttsService';
@@ -180,7 +181,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const isLandscape = previewWidth > previewHeight;
   const insets = useSafeAreaInsets();
   const { hasPermission, requestPermission } = useCameraPermission();
-  const { addWorkoutSession } = useApp();
+  const { addWorkoutSession, workoutHistory, setLastCoachMessage } = useApp();
   const frontDevice = useCameraDevice('front');
   const backDevice = useCameraDevice('back');
   const device = frontDevice ?? backDevice;
@@ -349,8 +350,12 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         score >= 90 ? 'Excellent' : score >= 75 ? 'Good' : score >= 60 ? 'Fair' : 'Needs Work',
     };
     addWorkoutSession(session); // also persists to Firebase via AppContext
+    // Fire proactive AI coaching message async — non-blocking, stores in context when ready.
+    getSessionEndMessage(session, workoutHistory).then(msg => {
+      if (msg) setLastCoachMessage(msg);
+    }).catch(() => {});
     return session;
-  }, [exerciseId, addWorkoutSession]);
+  }, [exerciseId, addWorkoutSession, workoutHistory, setLastCoachMessage]);
 
   const handleFinish = useCallback(() => {
     const session = persistSession();

@@ -43,6 +43,8 @@ interface AppContextValue {
   setHasCompletedOnboarding: (v: boolean) => void;
   workoutHistory: WorkoutSession[];
   addWorkoutSession: (session: WorkoutSession) => void;
+  lastCoachMessage: string | null;
+  setLastCoachMessage: (msg: string | null) => void;
   activeWorkout: ActiveWorkout;
   startWorkout: (exerciseId: ExerciseId) => void;
   pauseWorkout: () => void;
@@ -65,6 +67,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(false);
   const [workoutHistory, setWorkoutHistory] = useState<WorkoutSession[]>([]);
   const [activeWorkout, setActiveWorkout] = useState<ActiveWorkout>(defaultActiveWorkout);
+  const [lastCoachMessage, setLastCoachMessage] = useState<string | null>(null);
 
   // Stable ref so fire-and-forget callbacks always see the current user.
   const authUserRef = useRef<User | null>(null);
@@ -157,6 +160,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       profile, setProfile, updateProfile,
       hasCompletedOnboarding, setHasCompletedOnboarding,
       workoutHistory, addWorkoutSession,
+      lastCoachMessage, setLastCoachMessage,
       activeWorkout, startWorkout, pauseWorkout, resumeWorkout, stopWorkout, incrementRep, updateScore,
     }}>
       {children}

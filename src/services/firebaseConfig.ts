@@ -1,6 +1,7 @@
 import { initializeApp } from 'firebase/app';
 import { getDatabase } from 'firebase/database';
-import { initializeAuth, inMemoryPersistence } from 'firebase/auth';
+import { initializeAuth, getReactNativePersistence } from 'firebase/auth';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const firebaseConfig = {
   apiKey: 'AIzaSyCHseFM0MGGNbF0V_odxFg_dEqWokIMbpQ',
@@ -16,11 +17,10 @@ const app = initializeApp(firebaseConfig);
 
 export const database = getDatabase(app);
 
-// initializeAuth (not getAuth) is required to set a custom persistence layer on React Native.
-// TODO: swap to getReactNativePersistence(AsyncStorage) after running `npx expo run:android`
-// to include the AsyncStorage native module in the dev build.
+// getReactNativePersistence stores the Firebase Auth token in AsyncStorage so the
+// user stays signed in across app restarts until they explicitly sign out.
 export const auth = initializeAuth(app, {
-  persistence: inMemoryPersistence,
+  persistence: getReactNativePersistence(AsyncStorage),
 });
 
 export default app;
