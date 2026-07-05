@@ -23,7 +23,7 @@ import type { HomeStackParamList } from '../navigation/types';
 import { loadMoveNetModel } from '../services/moveNet';
 import { useApp } from '../context/AppContext';
 import { EXERCISES, formatDuration, type WorkoutSession } from '../data/exercises';
-import { saveWorkout } from '../services/firebaseWorkout';
+
 import { speakFeedback, speakImmediate, reset as ttsReset } from '../services/ttsService';
 import { INITIAL_SQUAT_STATE, SquatFsm, type SquatFsmState } from '../services/fsm/squatFsm';
 import { INITIAL_PUSHUP_STATE, PushupFsm, type PushupFsmState } from '../services/fsm/pushupFsm';
@@ -348,8 +348,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       formQuality:
         score >= 90 ? 'Excellent' : score >= 75 ? 'Good' : score >= 60 ? 'Fair' : 'Needs Work',
     };
-    addWorkoutSession(session);
-    saveWorkout(exerciseId.toUpperCase(), reps, score);
+    addWorkoutSession(session); // also persists to Firebase via AppContext
     return session;
   }, [exerciseId, addWorkoutSession]);
 

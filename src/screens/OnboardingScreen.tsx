@@ -144,7 +144,7 @@ export default function OnboardingScreen({ navigation }: Props) {
     if (activeSlide < SLIDES.length - 1) {
       goToSlide(activeSlide + 1);
     } else {
-      navigation.replace('ProfileSetup');
+      navigation.replace('SignUp');
     }
   };
 
@@ -163,7 +163,7 @@ export default function OnboardingScreen({ navigation }: Props) {
       <LinearGradient colors={['#0A0A0A', '#0A0A12', '#0A0A0A']} style={StyleSheet.absoluteFill} />
 
       {/* Skip */}
-      <TouchableOpacity style={styles.skipBtn} onPress={() => navigation.replace('ProfileSetup')}>
+      <TouchableOpacity style={styles.skipBtn} onPress={() => navigation.replace('SignUp')}>
         <Text style={styles.skipText}>Skip</Text>
       </TouchableOpacity>
 

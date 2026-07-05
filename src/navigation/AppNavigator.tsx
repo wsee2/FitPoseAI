@@ -18,10 +18,11 @@ import { Colors } from '../theme';
 
 import SplashScreen from '../screens/SplashScreen';
 import OnboardingScreen from '../screens/OnboardingScreen';
+import LoginScreen from '../screens/LoginScreen';
+import SignUpScreen from '../screens/SignUpScreen';
 import ProfileSetupScreen from '../screens/ProfileSetupScreen';
 import HomeScreen from '../screens/HomeScreen';
 import ExerciseSelectScreen from '../screens/ExerciseSelectScreen';
-import CameraCalibrationScreen from '../screens/CameraCalibrationScreen';
 import WorkoutScreen from '../screens/WorkoutScreen';
 import SessionSummaryScreen from '../screens/SessionSummaryScreen';
 import AnalyticsScreen from '../screens/AnalyticsScreen';
@@ -40,7 +41,6 @@ const HomeNavigator = () => (
   <HomeStack.Navigator screenOptions={{ headerShown: false }}>
     <HomeStack.Screen name="Home" component={HomeScreen} />
     <HomeStack.Screen name="ExerciseSelect" component={ExerciseSelectScreen} />
-    <HomeStack.Screen name="CameraCalibration" component={CameraCalibrationScreen} />
     <HomeStack.Screen name="Workout" component={WorkoutScreen} />
     <HomeStack.Screen name="SessionSummary" component={SessionSummaryScreen} />
   </HomeStack.Navigator>
@@ -129,6 +129,8 @@ export const AppNavigator = () => (
     <RootStack.Navigator screenOptions={{ headerShown: false, animation: 'fade' }}>
       <RootStack.Screen name="Splash" component={SplashScreen} />
       <RootStack.Screen name="Onboarding" component={OnboardingScreen} />
+      <RootStack.Screen name="Login" component={LoginScreen} />
+      <RootStack.Screen name="SignUp" component={SignUpScreen} />
       <RootStack.Screen name="ProfileSetup" component={ProfileSetupScreen} />
       <RootStack.Screen name="Main" component={MainNavigator} options={{ animation: 'fade' }} />
     </RootStack.Navigator>

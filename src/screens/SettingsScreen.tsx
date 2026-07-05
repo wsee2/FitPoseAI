@@ -6,6 +6,7 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { CommonActions } from '@react-navigation/native';
 import { Colors, BorderRadius } from '../theme';
 import { useApp } from '../context/AppContext';
 import type { SettingsStackParamList } from '../navigation/types';
@@ -39,7 +40,22 @@ const VOICE_OPTIONS = [
 ];
 
 export default function SettingsScreen({ navigation }: Props) {
-  const { profile, updateProfile } = useApp();
+  const { profile, updateProfile, authUser, signOutUser } = useApp();
+
+  const handleLogout = () => {
+    Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Sign Out', style: 'destructive', onPress: async () => {
+          await signOutUser();
+          // Navigate up to the root stack and replace with Login.
+          navigation.getParent()?.getParent()?.dispatch(
+            CommonActions.reset({ index: 0, routes: [{ name: 'Login' }] })
+          );
+        },
+      },
+    ]);
+  };
   const insets = useSafeAreaInsets();
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [notifications, setNotifications] = useState(true);
@@ -62,6 +78,13 @@ export default function SettingsScreen({ navigation }: Props) {
   };
 
   const sections: { title: string; rows: SettingRow[] }[] = [
+    {
+      title: 'Account',
+      rows: [
+        { id: 'email', label: 'Email', subtitle: authUser?.email ?? '—', icon: '📧', type: 'value' },
+        { id: 'logout', label: 'Sign Out', subtitle: 'Sign out of your account', icon: '🚪', type: 'danger', color: Colors.error, onPress: handleLogout },
+      ],
+    },
     {
       title: 'Profile',
       rows: [

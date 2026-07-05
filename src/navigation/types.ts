@@ -6,6 +6,8 @@ import type { ExerciseId } from '../data/exercises';
 export type RootStackParamList = {
   Splash: undefined;
   Onboarding: undefined;
+  Login: undefined;
+  SignUp: undefined;
   ProfileSetup: undefined;
   Main: undefined;
 };
@@ -20,7 +22,6 @@ export type MainTabParamList = {
 export type HomeStackParamList = {
   Home: undefined;
   ExerciseSelect: undefined;
-  CameraCalibration: { exerciseId: ExerciseId };
   Workout: { exerciseId: ExerciseId };
   SessionSummary: { sessionId: string };
 };
@@ -44,7 +45,6 @@ export type HomeScreenNavigationProp = CompositeNavigationProp<
 >;
 
 export type ExerciseSelectNavigationProp = NativeStackNavigationProp<HomeStackParamList, 'ExerciseSelect'>;
-export type CameraCalibrationNavigationProp = NativeStackNavigationProp<HomeStackParamList, 'CameraCalibration'>;
 export type WorkoutNavigationProp = NativeStackNavigationProp<HomeStackParamList, 'Workout'>;
 export type SessionSummaryNavigationProp = NativeStackNavigationProp<HomeStackParamList, 'SessionSummary'>;
 export type AnalyticsNavigationProp = NativeStackNavigationProp<AnalyticsStackParamList, 'Analytics'>;
@@ -52,6 +52,5 @@ export type WorkoutHistoryNavigationProp = NativeStackNavigationProp<AnalyticsSt
 export type AICoachNavigationProp = NativeStackNavigationProp<CoachStackParamList, 'AICoach'>;
 export type SettingsNavigationProp = NativeStackNavigationProp<SettingsStackParamList, 'Settings'>;
 
-export type CameraCalibrationRouteProp = RouteProp<HomeStackParamList, 'CameraCalibration'>;
 export type WorkoutRouteProp = RouteProp<HomeStackParamList, 'Workout'>;
 export type SessionSummaryRouteProp = RouteProp<HomeStackParamList, 'SessionSummary'>;

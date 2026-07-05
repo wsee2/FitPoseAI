@@ -75,9 +75,9 @@ export default function ProfileSetupScreen({ navigation }: Props) {
         level: level!,
         avatar: gender === 'female' ? 'female_athletic' : 'male_athletic',
         voice: 'energetic_male',
-        streak: 14,
-        totalWorkouts: 28,
-        totalReps: 840,
+        streak: 0,
+        totalWorkouts: 0,
+        totalReps: 0,
       });
       setHasCompletedOnboarding(true);
       navigation.replace('Main');

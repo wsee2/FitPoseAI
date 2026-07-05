@@ -1,5 +1,9 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
-import { ExerciseId, WorkoutSession, MOCK_HISTORY } from '../data/exercises';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import type { User } from 'firebase/auth';
+import { ExerciseId, WorkoutSession } from '../data/exercises';
+import { subscribeToAuthState, logout } from '../services/firebaseAuth';
+import { loadProfile, saveProfile, patchProfile } from '../services/firebaseProfile';
+import { saveSession, loadSessions } from '../services/firebaseWorkout';
 
 export type Gender = 'male' | 'female' | 'other';
 export type FitnessGoal = 'lose_weight' | 'build_muscle' | 'improve_endurance' | 'flexibility';
@@ -29,6 +33,9 @@ export interface ActiveWorkout {
 }
 
 interface AppContextValue {
+  authUser: User | null;
+  isLoadingAuth: boolean;
+  signOutUser: () => Promise<void>;
   profile: UserProfile | null;
   setProfile: (profile: UserProfile) => void;
   updateProfile: (partial: Partial<UserProfile>) => void;
@@ -46,55 +53,84 @@ interface AppContextValue {
 }
 
 const defaultActiveWorkout: ActiveWorkout = {
-  exerciseId: null,
-  startTime: null,
-  reps: 0,
-  score: 0,
-  isActive: false,
-  isPaused: false,
+  exerciseId: null, startTime: null, reps: 0, score: 0, isActive: false, isPaused: false,
 };
 
 const AppContext = createContext<AppContextValue | null>(null);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [isLoadingAuth, setIsLoadingAuth] = useState(true);
   const [profile, setProfileState] = useState<UserProfile | null>(null);
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(false);
-  const [workoutHistory, setWorkoutHistory] = useState<WorkoutSession[]>(MOCK_HISTORY);
+  const [workoutHistory, setWorkoutHistory] = useState<WorkoutSession[]>([]);
   const [activeWorkout, setActiveWorkout] = useState<ActiveWorkout>(defaultActiveWorkout);
 
-  const setProfile = useCallback((p: UserProfile) => setProfileState(p), []);
+  // Stable ref so fire-and-forget callbacks always see the current user.
+  const authUserRef = useRef<User | null>(null);
+  authUserRef.current = authUser;
+
+  useEffect(() => {
+    const unsub = subscribeToAuthState(async (user) => {
+      setAuthUser(user);
+      authUserRef.current = user;
+
+      if (user) {
+        const [savedProfile, savedSessions] = await Promise.all([
+          loadProfile(user.uid),
+          loadSessions(user.uid),
+        ]);
+        if (savedProfile) {
+          setProfileState(savedProfile);
+          setHasCompletedOnboarding(true);
+        }
+        setWorkoutHistory(savedSessions);
+      } else {
+        setProfileState(null);
+        setWorkoutHistory([]);
+        setHasCompletedOnboarding(false);
+      }
+
+      setIsLoadingAuth(false);
+    });
+    return unsub;
+  }, []);
+
+  const setProfile = useCallback((p: UserProfile) => {
+    setProfileState(p);
+    const uid = authUserRef.current?.uid;
+    if (uid) saveProfile(uid, p);
+  }, []);
 
   const updateProfile = useCallback((partial: Partial<UserProfile>) => {
-    setProfileState(prev => prev ? { ...prev, ...partial } : null);
-  }, []);
-
-  const addWorkoutSession = useCallback((session: WorkoutSession) => {
-    setWorkoutHistory(prev => [session, ...prev]);
-    setProfileState(prev => prev ? {
-      ...prev,
-      totalWorkouts: prev.totalWorkouts + 1,
-      totalReps: prev.totalReps + session.reps,
-    } : null);
-  }, []);
-
-  const startWorkout = useCallback((exerciseId: ExerciseId) => {
-    setActiveWorkout({
-      exerciseId,
-      startTime: Date.now(),
-      reps: 0,
-      score: 0,
-      isActive: true,
-      isPaused: false,
+    setProfileState((prev) => {
+      if (!prev) return null;
+      const updated = { ...prev, ...partial };
+      const uid = authUserRef.current?.uid;
+      if (uid) patchProfile(uid, partial);
+      return updated;
     });
   }, []);
 
-  const pauseWorkout = useCallback(() => {
-    setActiveWorkout(prev => ({ ...prev, isPaused: true }));
+  const addWorkoutSession = useCallback((session: WorkoutSession) => {
+    setWorkoutHistory((prev) => [session, ...prev]);
+    setProfileState((prev) =>
+      prev ? { ...prev, totalWorkouts: prev.totalWorkouts + 1, totalReps: prev.totalReps + session.reps } : null
+    );
+    saveSession(session); // reads auth.currentUser internally
   }, []);
 
-  const resumeWorkout = useCallback(() => {
-    setActiveWorkout(prev => ({ ...prev, isPaused: false }));
+  const signOutUser = useCallback(async () => {
+    await logout();
+    // auth state listener clears everything.
   }, []);
+
+  const startWorkout = useCallback((exerciseId: ExerciseId) => {
+    setActiveWorkout({ exerciseId, startTime: Date.now(), reps: 0, score: 0, isActive: true, isPaused: false });
+  }, []);
+
+  const pauseWorkout = useCallback(() => setActiveWorkout((p) => ({ ...p, isPaused: true })), []);
+  const resumeWorkout = useCallback(() => setActiveWorkout((p) => ({ ...p, isPaused: false })), []);
 
   const stopWorkout = useCallback((): WorkoutSession | null => {
     if (!activeWorkout.exerciseId || !activeWorkout.startTime) return null;
@@ -103,42 +139,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: Date.now().toString(),
       exerciseId: activeWorkout.exerciseId,
       date: new Date().toISOString().split('T')[0],
-      reps: activeWorkout.reps,
-      duration,
+      reps: activeWorkout.reps, duration,
       score: activeWorkout.score,
       calories: Math.round(activeWorkout.reps * 0.3),
-      formQuality: activeWorkout.score >= 90 ? 'Excellent' :
-                   activeWorkout.score >= 75 ? 'Good' :
-                   activeWorkout.score >= 60 ? 'Fair' : 'Needs Work',
+      formQuality: activeWorkout.score >= 90 ? 'Excellent' : activeWorkout.score >= 75 ? 'Good' : activeWorkout.score >= 60 ? 'Fair' : 'Needs Work',
     };
     setActiveWorkout(defaultActiveWorkout);
     return session;
   }, [activeWorkout]);
 
-  const incrementRep = useCallback(() => {
-    setActiveWorkout(prev => ({ ...prev, reps: prev.reps + 1 }));
-  }, []);
-
-  const updateScore = useCallback((score: number) => {
-    setActiveWorkout(prev => ({ ...prev, score }));
-  }, []);
+  const incrementRep = useCallback(() => setActiveWorkout((p) => ({ ...p, reps: p.reps + 1 })), []);
+  const updateScore = useCallback((score: number) => setActiveWorkout((p) => ({ ...p, score })), []);
 
   return (
     <AppContext.Provider value={{
-      profile,
-      setProfile,
-      updateProfile,
-      hasCompletedOnboarding,
-      setHasCompletedOnboarding,
-      workoutHistory,
-      addWorkoutSession,
-      activeWorkout,
-      startWorkout,
-      pauseWorkout,
-      resumeWorkout,
-      stopWorkout,
-      incrementRep,
-      updateScore,
+      authUser, isLoadingAuth, signOutUser,
+      profile, setProfile, updateProfile,
+      hasCompletedOnboarding, setHasCompletedOnboarding,
+      workoutHistory, addWorkoutSession,
+      activeWorkout, startWorkout, pauseWorkout, resumeWorkout, stopWorkout, incrementRep, updateScore,
     }}>
       {children}
     </AppContext.Provider>

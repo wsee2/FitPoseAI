@@ -154,7 +154,7 @@ export default function HomeScreen({ navigation }: Props) {
               <TouchableOpacity
                 key={ex.id}
                 style={styles.exercisePill}
-                onPress={() => navigation.navigate('CameraCalibration', { exerciseId: ex.id })}
+                onPress={() => navigation.navigate('Workout', { exerciseId: ex.id })}
                 activeOpacity={0.82}
               >
                 <LinearGradient
