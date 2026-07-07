@@ -1,10 +1,13 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { WorkoutSession } from '../data/exercises';
 
-const MODEL_NAME = 'gemini-2.0-flash';
+const MODEL_NAME = 'gemini-2.5-flash-lite';
 const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY ?? '';
 
 const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+
+// Logged on every Metro start — key presence is safe to log; the value is never logged.
+console.log('[aiCoach] init — key present:', !!GEMINI_API_KEY, '| model:', MODEL_NAME);
 
 const SYSTEM_PROMPT = `You are FitPose AI Coach, a personal fitness trainer for 5 bodyweight exercises: squats, push-ups, lunges, planks, and sit-ups.
 
@@ -15,9 +18,22 @@ Rules:
 - Do NOT invent workout data. Only reference data explicitly provided in the user's history context below.
 - For workout plans: structure by day/week, keep it simple and achievable.`;
 
+/** One automatic retry after 2 s for transient 5xx errors. Never retries 4xx. */
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err: any) {
+    if (err?.status != null && err.status >= 500 && err.status < 600) {
+      await new Promise(r => setTimeout(r, 2000));
+      return fn(); // single retry — any error here propagates to caller
+    }
+    throw err;
+  }
+}
+
 // Rate limiting: one proactive call per event key per cooldown window.
 const lastFiredMs = new Map<string, number>();
-const PROACTIVE_COOLDOWN_MS = 20 * 60 * 1000; // 20 minutes
+const PROACTIVE_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours — conserves free-tier daily budget
 
 function canFire(key: string): boolean {
   const last = lastFiredMs.get(key) ?? 0;
@@ -62,12 +78,17 @@ export async function sendChatMessage(chat: any, userMessage: string): Promise<s
   }
   if (!chat) return 'Chat session not initialized. Please close and reopen this screen.';
   try {
-    const result = await chat.sendMessage(userMessage);
+    const result = await withRetry(() => chat.sendMessage(userMessage));
     return result.response.text().trim();
   } catch (err: any) {
-    console.warn('[aiCoach] sendChatMessage error:', err?.status, err?.message);
+    const rawMsg = String(err?.message ?? err);
+    console.warn('[aiCoach] sendChatMessage RAW | status:', err?.status, '| msg:', rawMsg);
+    try { console.warn('[aiCoach] sendChatMessage FULL:', JSON.stringify(err)); } catch {}
+    if (err?.status === 503) return "The AI server is a bit busy right now — please try again in a moment.";
     if (err?.status === 429) return "I'm receiving too many requests — try again in a moment!";
-    if (err?.message?.includes('network') || err?.message?.includes('fetch'))
+    if (err?.status === 404 || rawMsg.includes('not found') || rawMsg.includes('deprecated'))
+      return 'The AI model is currently unavailable. Please try again in a moment.';
+    if (rawMsg.includes('network') || rawMsg.includes('fetch'))
       return "Couldn't reach my server. Check your internet connection and try again.";
     return 'Something went wrong on my end. Try again in a moment.';
   }
@@ -99,10 +120,11 @@ Write ONE encouraging coaching message (2-3 sentences). Be specific to their sco
 
   try {
     const model = genAI.getGenerativeModel({ model: MODEL_NAME, systemInstruction: SYSTEM_PROMPT });
-    const result = await model.generateContent(prompt);
+    const result = await withRetry(() => model.generateContent(prompt));
     return result.response.text().trim();
-  } catch (err) {
-    console.warn('[aiCoach] getSessionEndMessage error:', err);
+  } catch (err: any) {
+    console.warn('[aiCoach] getSessionEndMessage RAW | status:', err?.status, '| msg:', String(err?.message ?? err));
+    try { console.warn('[aiCoach] getSessionEndMessage FULL:', JSON.stringify(err)); } catch {}
     return null;
   }
 }
@@ -122,10 +144,11 @@ export async function getTrendMessage(sessions: WorkoutSession[]): Promise<strin
 
   try {
     const model = genAI.getGenerativeModel({ model: MODEL_NAME, systemInstruction: SYSTEM_PROMPT });
-    const result = await model.generateContent(prompt);
+    const result = await withRetry(() => model.generateContent(prompt));
     return result.response.text().trim();
-  } catch (err) {
-    console.warn('[aiCoach] getTrendMessage error:', err);
+  } catch (err: any) {
+    console.warn('[aiCoach] getTrendMessage RAW | status:', err?.status, '| msg:', String(err?.message ?? err));
+    try { console.warn('[aiCoach] getTrendMessage FULL:', JSON.stringify(err)); } catch {}
     return null;
   }
 }

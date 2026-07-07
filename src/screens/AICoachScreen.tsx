@@ -181,7 +181,7 @@ export default function AICoachScreen({ navigation }: Props) {
               <Text style={styles.coachName}>FitPose AI Coach</Text>
               <View style={styles.onlineRow}>
                 <View style={styles.onlineDot} />
-                <Text style={styles.onlineText}>Online · Gemini 2.0 Flash</Text>
+                <Text style={styles.onlineText}>Online · Gemini 2.5 Flash Lite</Text>
               </View>
             </View>
           </View>
