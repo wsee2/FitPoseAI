@@ -4,7 +4,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import Svg, { Path, Circle, Rect } from 'react-native-svg';
-import { BlurView } from 'expo-blur';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
   RootStackParamList,
@@ -97,32 +97,38 @@ const SettingsIcon = ({ color }: { color: string }) => (
   </Svg>
 );
 
-const MainNavigator = () => (
-  <Tab.Navigator
-    screenOptions={({ route }) => ({
-      headerShown: false,
-      tabBarStyle: styles.tabBar,
-      tabBarBackground: () => (
-        <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
-      ),
-      tabBarActiveTintColor: Colors.cyan,
-      tabBarInactiveTintColor: Colors.textMuted,
-      tabBarShowLabel: true,
-      tabBarLabelStyle: styles.tabLabel,
-      tabBarIcon: ({ color }) => {
-        if (route.name === 'HomeTab') return <HomeIcon color={color} />;
-        if (route.name === 'AnalyticsTab') return <AnalyticsIcon color={color} />;
-        if (route.name === 'CoachTab') return <CoachIcon color={color} />;
-        return <SettingsIcon color={color} />;
-      },
-    })}
-  >
-    <Tab.Screen name="HomeTab" component={HomeNavigator} options={{ tabBarLabel: 'Home' }} />
-    <Tab.Screen name="AnalyticsTab" component={AnalyticsNavigator} options={{ tabBarLabel: 'Progress' }} />
-    <Tab.Screen name="CoachTab" component={CoachNavigator} options={{ tabBarLabel: 'AI Coach' }} />
-    <Tab.Screen name="SettingsTab" component={SettingsNavigator} options={{ tabBarLabel: 'Settings' }} />
-  </Tab.Navigator>
-);
+const MainNavigator = () => {
+  const insets = useSafeAreaInsets();
+  const tabBarHeight = 60 + insets.bottom;
+
+  return (
+    <Tab.Navigator
+      screenOptions={({ route }) => ({
+        headerShown: false,
+        tabBarStyle: {
+          ...styles.tabBar,
+          height: tabBarHeight,
+          paddingBottom: insets.bottom,
+        },
+        tabBarActiveTintColor: Colors.cyan,
+        tabBarInactiveTintColor: Colors.textMuted,
+        tabBarShowLabel: true,
+        tabBarLabelStyle: styles.tabLabel,
+        tabBarIcon: ({ color }) => {
+          if (route.name === 'HomeTab') return <HomeIcon color={color} />;
+          if (route.name === 'AnalyticsTab') return <AnalyticsIcon color={color} />;
+          if (route.name === 'CoachTab') return <CoachIcon color={color} />;
+          return <SettingsIcon color={color} />;
+        },
+      })}
+    >
+      <Tab.Screen name="HomeTab" component={HomeNavigator} options={{ tabBarLabel: 'Home' }} />
+      <Tab.Screen name="AnalyticsTab" component={AnalyticsNavigator} options={{ tabBarLabel: 'Progress' }} />
+      <Tab.Screen name="CoachTab" component={CoachNavigator} options={{ tabBarLabel: 'AI Coach' }} />
+      <Tab.Screen name="SettingsTab" component={SettingsNavigator} options={{ tabBarLabel: 'Settings' }} />
+    </Tab.Navigator>
+  );
+};
 
 export const AppNavigator = () => (
   <NavigationContainer>
@@ -142,8 +148,8 @@ const styles = StyleSheet.create({
     position: 'absolute',
     borderTopWidth: 1,
     borderTopColor: Colors.border,
-    backgroundColor: 'transparent',
-    elevation: 0,
+    backgroundColor: Colors.card,
+    elevation: 8,
     height: 60,
   },
   tabLabel: {

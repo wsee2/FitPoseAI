@@ -62,7 +62,7 @@ export default function HomeScreen({ navigation }: Props) {
               <Text style={styles.greeting}>{greeting()},</Text>
               <Text style={styles.username}>{firstName} 👋</Text>
             </View>
-            <TouchableOpacity style={styles.avatarBtn} onPress={() => {}}>
+            <TouchableOpacity style={styles.avatarBtn} onPress={() => navigation.getParent()?.navigate('SettingsTab')}>
               <LinearGradient colors={[Colors.cyanDim, Colors.card]} style={styles.avatar}>
                 <Text style={styles.avatarInitial}>{firstName[0]?.toUpperCase()}</Text>
               </LinearGradient>

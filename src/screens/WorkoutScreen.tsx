@@ -31,7 +31,7 @@ import { INITIAL_PUSHUP_STATE, PushupFsm, type PushupFsmState } from '../service
 import { INITIAL_LUNGE_STATE, LungeFsm, type LungeFsmState } from '../services/fsm/lungeFsm';
 import { INITIAL_PLANK_STATE, PlankFsm, type PlankFsmState } from '../services/fsm/plankFsm';
 import { INITIAL_SITUP_STATE, SitupFsm, type SitupFsmState } from '../services/fsm/situpFsm';
-import SkeletonOverlay, { CONF_THRESHOLD, type SkeletonStatus } from '../components/SkeletonOverlay';
+import SkeletonOverlay, { CONF_THRESHOLD, STATUS_COLORS, type SkeletonStatus } from '../components/SkeletonOverlay';
 
 /** Pulls the exercise-specific (reps, score) pair out of whichever FSM is active. */
 function getFinalStats(
@@ -115,16 +115,22 @@ function applyOverlayTransform(kp: number[], t: OverlayTransform): number[] {
 // Calibration phase
 type WorkoutPhase = 'calibrating' | 'countdown' | 'active';
 
-// Keypoints that must ALL be visible and in-frame before the workout starts.
-const CALIB_REQUIRED_KPS = [0, 5, 6, 11, 12, 13, 14, 15, 16]; // nose, shoulders, hips, knees, ankles
+// Keypoints that must ALL be visible before the workout starts.
+// Ankles (15, 16) intentionally excluded — they're the least reliable and often
+// clip at the bottom edge, causing unnecessary calibration failures.
+const CALIB_REQUIRED_KPS = [0, 5, 6, 11, 12, 13, 14]; // nose, shoulders, hips, knees
+// Lower confidence threshold for calibration — pose detection is noisier at distance.
+const CALIB_CONF_THRESHOLD = 0.2;
 // Margin from edge: keypoints within [MARGIN, 1-MARGIN] are considered "in frame".
-const CALIB_FRAME_MARGIN = 0.05;
-// Consecutive valid frames required before triggering the countdown.
-const CALIB_STABLE_FRAMES = 8;
-// For upright exercises: ankleY - shoulderY must exceed this (world-upright fsmKp frame).
-const CALIB_UPRIGHT_SPREAD = 0.4;
-// For horizontal exercises: abs(shoulderY - ankleY) must be below this.
-const CALIB_HORIZONTAL_SPREAD = 0.25;
+const CALIB_FRAME_MARGIN = 0.04;
+// Consecutive valid frames required before triggering the countdown (reduced from 8).
+const CALIB_STABLE_FRAMES = 5;
+// Consecutive bad frames needed to reset the stable counter — absorbs momentary noise.
+const CALIB_BAD_TOLERANCE = 5;
+// For upright exercises: kneeY - shoulderY must exceed this.
+const CALIB_UPRIGHT_SPREAD = 0.28;
+// For horizontal exercises: abs(shoulderY - kneeY) must be below this.
+const CALIB_HORIZONTAL_SPREAD = 0.2;
 // Exercises that require a horizontal body posture.
 const HORIZONTAL_EXERCISES = new Set(['pushup', 'plank']);
 
@@ -133,8 +139,8 @@ const HORIZONTAL_EXERCISES = new Set(['pushup', 'plank']);
  * Called on every frame during 'calibrating' and 'countdown' phases.
  */
 function checkCalibration(fsmKp: number[], exerciseId: string): { valid: boolean; guidance: string } {
-  // 1. All required keypoints above confidence threshold.
-  const allDetected = CALIB_REQUIRED_KPS.every((i) => (fsmKp[i * 3 + 2] ?? 0) >= CONF_THRESHOLD);
+  // 1. All required keypoints above calibration confidence threshold.
+  const allDetected = CALIB_REQUIRED_KPS.every((i) => (fsmKp[i * 3 + 2] ?? 0) >= CALIB_CONF_THRESHOLD);
   if (!allDetected) {
     return { valid: false, guidance: 'Step into the frame' };
   }
@@ -152,16 +158,16 @@ function checkCalibration(fsmKp: number[], exerciseId: string): { valid: boolean
     return { valid: false, guidance: 'Move back — full body must be visible' };
   }
 
-  // 3. Exercise-specific posture check using orientation-normalized coordinates.
+  // 3. Exercise-specific posture check using knees (more reliable than ankles).
   const shoulderY = ((fsmKp[5 * 3] ?? 0) + (fsmKp[6 * 3] ?? 0)) / 2;
-  const ankleY   = ((fsmKp[15 * 3] ?? 0) + (fsmKp[16 * 3] ?? 0)) / 2;
+  const kneeY     = ((fsmKp[13 * 3] ?? 0) + (fsmKp[14 * 3] ?? 0)) / 2;
 
   if (HORIZONTAL_EXERCISES.has(exerciseId)) {
-    if (Math.abs(shoulderY - ankleY) >= CALIB_HORIZONTAL_SPREAD) {
+    if (Math.abs(shoulderY - kneeY) >= CALIB_HORIZONTAL_SPREAD) {
       return { valid: false, guidance: 'Get into position — body horizontal' };
     }
   } else {
-    if (ankleY - shoulderY <= CALIB_UPRIGHT_SPREAD) {
+    if (kneeY - shoulderY <= CALIB_UPRIGHT_SPREAD) {
       return { valid: false, guidance: 'Stand upright facing the camera' };
     }
   }
@@ -224,10 +230,27 @@ export default function WorkoutScreen({ navigation, route }: Props) {
 
   const [countdownNum, setCountdownNum] = useState(3);
   const stableFramesRef = useRef(0);
+  const badFramesRef = useRef(0); // consecutive invalid frames; resets stable counter only after CALIB_BAD_TOLERANCE
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Scale animation for the countdown digit.
   const countdownScale = useRef(new Animated.Value(1)).current;
+
+  // Status border — pulsing opacity during calibration, solid otherwise.
+  const borderPulse = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (phase === 'calibrating') {
+      const anim = Animated.loop(
+        Animated.sequence([
+          Animated.timing(borderPulse, { toValue: 0.2, duration: 900, useNativeDriver: true }),
+          Animated.timing(borderPulse, { toValue: 1,   duration: 900, useNativeDriver: true }),
+        ])
+      );
+      anim.start();
+      return () => anim.stop();
+    }
+    Animated.timing(borderPulse, { toValue: 1, duration: 200, useNativeDriver: true }).start();
+  }, [phase]);
   // ---------------------------------------------------------------------------
 
   // Reset the active exercise's FSM (and calibration state) whenever the screen is entered.
@@ -244,6 +267,8 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       clearInterval(countdownTimerRef.current);
       countdownTimerRef.current = null;
     }
+    stableFramesRef.current = 0;
+    badFramesRef.current = 0;
 
     // Reset FSMs
     switch (exerciseId) {
@@ -446,14 +471,15 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       if (currentPhase === 'calibrating') {
         const { valid, guidance } = checkCalibration(fsmKp, exerciseId);
         if (valid) {
+          badFramesRef.current = 0;
           stableFramesRef.current += 1;
           if (stableFramesRef.current >= CALIB_STABLE_FRAMES) {
             // Enough stable frames — kick off countdown.
             stableFramesRef.current = 0;
+            badFramesRef.current = 0;
             phaseRef.current = 'countdown';
             setPhase('countdown');
           } else {
-            // Show stabilizing guidance (only update state when text changes).
             if (calibGuidanceRef.current !== 'Hold still...') {
               calibGuidanceRef.current = 'Hold still...';
               setCalibGuidance('Hold still...');
@@ -461,7 +487,12 @@ export default function WorkoutScreen({ navigation, route }: Props) {
             speakFeedback('Hold still');
           }
         } else {
-          stableFramesRef.current = 0;
+          badFramesRef.current += 1;
+          // Only wipe stable progress after CALIB_BAD_TOLERANCE consecutive bad frames.
+          // A few noisy frames should not reset all accumulated progress.
+          if (badFramesRef.current >= CALIB_BAD_TOLERANCE) {
+            stableFramesRef.current = 0;
+          }
           if (calibGuidanceRef.current !== guidance) {
             calibGuidanceRef.current = guidance;
             setCalibGuidance(guidance);
@@ -472,20 +503,26 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       }
 
       if (currentPhase === 'countdown') {
-        // If the user steps out of frame during countdown, cancel it.
         const { valid } = checkCalibration(fsmKp, exerciseId);
         if (!valid) {
-          if (countdownTimerRef.current) {
-            clearInterval(countdownTimerRef.current);
-            countdownTimerRef.current = null;
+          badFramesRef.current += 1;
+          // Only cancel the countdown after sustained loss of valid pose.
+          if (badFramesRef.current >= CALIB_BAD_TOLERANCE) {
+            if (countdownTimerRef.current) {
+              clearInterval(countdownTimerRef.current);
+              countdownTimerRef.current = null;
+            }
+            stableFramesRef.current = 0;
+            badFramesRef.current = 0;
+            const msg = 'Come back into the frame';
+            calibGuidanceRef.current = msg;
+            setCalibGuidance(msg);
+            phaseRef.current = 'calibrating';
+            setPhase('calibrating');
+            speakFeedback(msg);
           }
-          stableFramesRef.current = 0;
-          const msg = 'Come back into the frame';
-          calibGuidanceRef.current = msg;
-          setCalibGuidance(msg);
-          phaseRef.current = 'calibrating';
-          setPhase('calibrating');
-          speakFeedback(msg);
+        } else {
+          badFramesRef.current = 0;
         }
         return; // Never call FSMs during countdown.
       }
@@ -579,6 +616,8 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       default:       currentStatus = 'guide';
     }
   }
+
+  const statusBorderColor = STATUS_COLORS[currentStatus];
 
   const trackedCount =
     keypoints.length >= 51
@@ -724,6 +763,12 @@ export default function WorkoutScreen({ navigation, route }: Props) {
             : '⏳ Loading model…'}
         </Text>
       </View>
+
+      {/* Status border — thick coloured ring visible from far away */}
+      <Animated.View
+        pointerEvents="none"
+        style={[StyleSheet.absoluteFill, styles.statusBorder, { borderColor: statusBorderColor, opacity: borderPulse }]}
+      />
     </View>
   );
 }
@@ -853,5 +898,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 6,
     textAlign: 'center',
+  },
+  statusBorder: {
+    borderWidth: 8,
+    zIndex: 1000,
   },
 });
