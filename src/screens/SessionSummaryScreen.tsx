@@ -78,7 +78,7 @@ export default function SessionSummaryScreen({ navigation, route }: Props) {
       <View style={[styles.glow, { backgroundColor: `${exercise.accentColor}08` }]} />
 
       <ScrollView
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 100 }]}
+        contentContainerStyle={[styles.content, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 160 }]}
         showsVerticalScrollIndicator={false}
       >
         <Animated.View style={{ opacity: fadeAnim, transform: [{ scale: scaleAnim }] }}>
@@ -187,8 +187,8 @@ export default function SessionSummaryScreen({ navigation, route }: Props) {
         </Animated.View>
       </ScrollView>
 
-      {/* Bottom actions */}
-      <View style={[styles.bottomActions, { paddingBottom: insets.bottom + 16 }]}>
+      {/* Bottom actions — paddingBottom clears system nav (insets.bottom) + tab bar (60px) */}
+      <View style={[styles.bottomActions, { paddingBottom: insets.bottom + 76 }]}>
         <LinearGradient colors={['transparent', Colors.background]} style={StyleSheet.absoluteFill} pointerEvents="none" />
         <View style={styles.actionRow}>
           <TouchableOpacity

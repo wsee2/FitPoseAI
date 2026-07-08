@@ -52,7 +52,7 @@ export default function ExerciseSelectScreen({ navigation }: Props) {
       </Text>
 
       <ScrollView
-        contentContainerStyle={[styles.list, { paddingBottom: insets.bottom + 120 }]}
+        contentContainerStyle={[styles.list, { paddingBottom: insets.bottom + 160 }]}
         showsVerticalScrollIndicator={false}
       >
         {EXERCISE_LIST.map((ex) => {
@@ -132,9 +132,9 @@ export default function ExerciseSelectScreen({ navigation }: Props) {
         )}
       </ScrollView>
 
-      {/* CTA */}
+      {/* CTA — paddingBottom clears system nav (insets.bottom) + tab bar (60px) */}
       {selected && (
-        <View style={[styles.ctaBar, { paddingBottom: insets.bottom + 12 }]}>
+        <View style={[styles.ctaBar, { paddingBottom: insets.bottom + 72 }]}>
           <LinearGradient
             colors={['transparent', Colors.background]}
             style={StyleSheet.absoluteFill}
