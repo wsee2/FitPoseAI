@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity,
-  KeyboardAvoidingView, Platform, Animated,
+  KeyboardAvoidingView, Platform, Animated, Keyboard,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle, Path, Rect as SvgRect } from 'react-native-svg';
@@ -73,10 +73,22 @@ export default function AICoachScreen({ navigation }: Props) {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
   const typingDot1 = useRef(new Animated.Value(0)).current;
   const typingDot2 = useRef(new Animated.Value(0)).current;
   const typingDot3 = useRef(new Animated.Value(0)).current;
+
+  // On Android with edgeToEdgeEnabled the OS doesn't resize the window when the keyboard opens,
+  // so KeyboardAvoidingView has no effect. Instead we read the keyboard height and apply it as
+  // paddingBottom on the container — this compresses the flex column and lifts the input bar
+  // to sit directly above the keyboard. When the keyboard closes the padding returns to 0.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const show = Keyboard.addListener('keyboardDidShow', (e) => setKeyboardHeight(e.endCoordinates.height));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboardHeight(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
 
   // Capture initial values so the mount effect doesn't need dynamic deps.
   const initialHistoryRef = useRef(workoutHistory);
@@ -84,7 +96,7 @@ export default function AICoachScreen({ navigation }: Props) {
   const firstName = profile?.name?.split(' ')[0] ?? 'there';
 
   useEffect(() => {
-    // Initialize Gemini chat session seeded with user history.
+    // Initialize chat session seeded with user history.
     chatRef.current = createChatSession(initialHistoryRef.current);
 
     const greeting: Message = {
@@ -170,7 +182,7 @@ export default function AICoachScreen({ navigation }: Props) {
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <View style={styles.container}>
+      <View style={[styles.container, Platform.OS === 'android' ? { paddingBottom: keyboardHeight > 0 ? keyboardHeight + insets.bottom : 0 } : undefined]}>
         <LinearGradient colors={['#0A0A12', '#0A0A0A']} style={StyleSheet.absoluteFill} />
 
         {/* Header */}
@@ -181,7 +193,7 @@ export default function AICoachScreen({ navigation }: Props) {
               <Text style={styles.coachName}>FitPose AI Coach</Text>
               <View style={styles.onlineRow}>
                 <View style={styles.onlineDot} />
-                <Text style={styles.onlineText}>Online · Gemini 2.5 Flash Lite</Text>
+                <Text style={styles.onlineText}>Online · GPT-4o Mini</Text>
               </View>
             </View>
           </View>
@@ -265,7 +277,7 @@ export default function AICoachScreen({ navigation }: Props) {
         </ScrollView>
 
         {/* Input bar */}
-        <View style={[styles.inputBar, { paddingBottom: insets.bottom + 12 }]}>
+        <View style={[styles.inputBar, { paddingBottom: keyboardHeight > 0 ? 8 : insets.bottom + 72 }]}>
           <View style={styles.inputContainer}>
             <TextInput
               style={styles.textInput}
