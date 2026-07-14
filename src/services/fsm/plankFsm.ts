@@ -1,5 +1,7 @@
 import { calculateAngle, getKeypoint, type Keypoint } from '../poseMath';
 
+const DEBUG_PLANK = true;
+
 // MoveNet (COCO-17) keypoint indices used by this FSM.
 const LEFT_SHOULDER = 5;
 const RIGHT_SHOULDER = 6;
@@ -14,11 +16,13 @@ const RIGHT_KNEE = 14;
 const LEFT_ANKLE = 15;
 const RIGHT_ANKLE = 16;
 
-// Tested thresholds ported exactly from the Python prototype — do not retune without re-validating there.
+// LEGS_STRAIGHT_ANGLE lowered 138→130: MoveNet knee coords are noisy for horizontal poses.
+// severeBad no longer includes !legsStraight — brief noisy frames now use the grace window
+// instead of immediately freezing the timer.
 const ELBOW_BENT_ANGLE = 135;
 const SUPPORT_GAP_BENT = 0.034;
 const SUPPORT_GAP_STRAIGHT = 0.018;
-const LEGS_STRAIGHT_ANGLE = 138;
+const LEGS_STRAIGHT_ANGLE = 130;
 const BODY_STRAIGHT_ANGLE = 152;
 const BODY_LEVEL_DIFF = 0.14;
 const SEVERE_BODY_ANGLE = 138;
@@ -117,8 +121,10 @@ export class PlankFsm {
     const bodyStraight = bodyAngle > BODY_STRAIGHT_ANGLE;
     const bodyLevel = hDiff < BODY_LEVEL_DIFF;
     const goodPlank = bodyStraight && bodyLevel && torsoElevated && legsStraight;
+    // !legsStraight removed from severeBad: MoveNet knee noise must not instantly freeze the timer.
+    // Bent-leg frames now consume the PLANK_GRACE window instead of triggering immediate pause.
     const severeBad =
-      !torsoElevated || !legsStraight || bodyAngle < SEVERE_BODY_ANGLE || !bodyLevel;
+      !torsoElevated || bodyAngle < SEVERE_BODY_ANGLE || !bodyLevel;
 
     const neverStarted = this.plankHoldTime === 0 && this.plankStartTime === null;
 
@@ -145,19 +151,37 @@ export class PlankFsm {
       }
     }
 
+    if (DEBUG_PLANK) {
+      const whyNot = !goodPlank
+        ? ([
+            !torsoElevated ? 'torsoElev' : null,
+            !legsStraight  ? `legsStraight(${legAngle.toFixed(1)}°)` : null,
+            !bodyStraight  ? 'bodyStraight' : null,
+            !bodyLevel     ? 'bodyLevel' : null,
+          ] as (string | null)[]).filter(Boolean).join('+')
+        : '';
+      console.log(
+        `[PLANK] body=${bodyAngle.toFixed(1)}° hDiff=${hDiff.toFixed(3)} ` +
+        `gap=${shoulderSupportGap.toFixed(3)} torsoElev=${torsoElevated} ` +
+        `legsStraight=${legsStraight}(${legAngle.toFixed(1)}°) level=${bodyLevel} straight=${bodyStraight} ` +
+        `good=${goodPlank} severe=${severeBad} hold=${totalHold.toFixed(1)}s running=${this.plankStartTime !== null}` +
+        (whyNot ? ` WHY_NOT:${whyNot}` : '')
+      );
+    }
+
     let feedback: string;
     if (goodPlank) {
       feedback = 'Hold the plank';
     } else if (severeBad) {
       if (!torsoElevated) {
         feedback = 'Lift up - off the floor';
-      } else if (!legsStraight) {
-        feedback = 'Straighten legs';
       } else if (!bodyLevel) {
         feedback = 'Keep body horizontal';
       } else {
         feedback = 'No sag - body straight';
       }
+    } else if (!legsStraight) {
+      feedback = 'Straighten legs';
     } else if (!bodyLevel) {
       feedback = 'Keep body horizontal';
     } else if (!bodyStraight) {

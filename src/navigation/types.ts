@@ -15,8 +15,13 @@ export type RootStackParamList = {
 export type MainTabParamList = {
   HomeTab: undefined;
   AnalyticsTab: undefined;
+  VideoTab: undefined;
   CoachTab: undefined;
   SettingsTab: undefined;
+};
+
+export type VideoStackParamList = {
+  VideoAnalysis: { exerciseId?: ExerciseId };
 };
 
 export type HomeStackParamList = {
@@ -24,6 +29,7 @@ export type HomeStackParamList = {
   ExerciseSelect: undefined;
   Workout: { exerciseId: ExerciseId };
   SessionSummary: { sessionId: string };
+  VideoAnalysis: { exerciseId?: ExerciseId };
 };
 
 export type AnalyticsStackParamList = {

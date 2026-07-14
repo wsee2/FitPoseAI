@@ -1,5 +1,7 @@
 import { calculateAngle, getKeypoint, type Keypoint } from '../poseMath';
 
+const DEBUG_PUSHUP = true;
+
 // MoveNet (COCO-17) keypoint indices used by this FSM.
 const LEFT_SHOULDER = 5;
 const RIGHT_SHOULDER = 6;
@@ -12,12 +14,13 @@ const RIGHT_HIP = 12;
 const LEFT_ANKLE = 15;
 const RIGHT_ANKLE = 16;
 
-// Tested thresholds ported exactly from the Python prototype — do not retune without re-validating there.
-const ELBOW_UP_ANGLE = 155;
-const ELBOW_DOWN_ANGLE = 90;
+// Relaxed from Python prototype: 155→145 (UP), 90→100 (DOWN), 155→150 (body straight), 0.12→0.15 (body level).
+// Real push-ups rarely achieve 155° lock-out; the stricter values meant the UP gate never fired.
+const ELBOW_UP_ANGLE = 145;
+const ELBOW_DOWN_ANGLE = 100;
 const ELBOW_TOO_LOW_ANGLE = 60;
-const BODY_STRAIGHT_ANGLE = 155;
-const BODY_LEVEL_DIFF = 0.12;
+const BODY_STRAIGHT_ANGLE = 150;
+const BODY_LEVEL_DIFF = 0.15;
 const ARMS_SUPPORTING_MARGIN = 0.03;
 const PERFECT_MIN = 70;
 const PERFECT_MAX = 90;
@@ -113,6 +116,14 @@ export class PushupFsm {
     const bodyStraight = bodyAngle > BODY_STRAIGHT_ANGLE;
     const bodyLevel = hDiff < BODY_LEVEL_DIFF;
     const armsSupporting = elbowMidY < wristMidY - ARMS_SUPPORTING_MARGIN;
+
+    if (DEBUG_PUSHUP) {
+      console.log(
+        `[PUSHUP] stage=${this.stage ?? 'null'} ` +
+        `elbow=${elbowAngle.toFixed(1)}° body=${bodyAngle.toFixed(1)}° ` +
+        `hDiff=${hDiff.toFixed(3)} arms=${armsSupporting} level=${bodyLevel} straight=${bodyStraight}`
+      );
+    }
 
     if (elbowAngle > ELBOW_UP_ANGLE && bodyLevel && armsSupporting) {
       if (this.stage === 'DOWN') {

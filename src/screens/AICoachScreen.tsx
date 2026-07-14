@@ -9,6 +9,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Colors, BorderRadius } from '../theme';
 import { useApp } from '../context/AppContext';
+import CoachRobot from '../components/CoachRobot';
 import { createChatSession, sendChatMessage, getTrendMessage } from '../services/aiCoach';
 import { speakImmediate } from '../services/ttsService';
 import type { CoachStackParamList } from '../navigation/types';
@@ -78,6 +79,9 @@ export default function AICoachScreen({ navigation }: Props) {
   const typingDot1 = useRef(new Animated.Value(0)).current;
   const typingDot2 = useRef(new Animated.Value(0)).current;
   const typingDot3 = useRef(new Animated.Value(0)).current;
+  const [coachExpression, setCoachExpression] = useState(1);
+  const prevIsTypingRef = useRef(false);
+  const expressionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // On Android with edgeToEdgeEnabled the OS doesn't resize the window when the keyboard opens,
   // so KeyboardAvoidingView has no effect. Instead we read the keyboard height and apply it as
@@ -148,6 +152,24 @@ export default function AICoachScreen({ navigation }: Props) {
         );
       Animated.parallel([animDot(typingDot1, 0), animDot(typingDot2, 150), animDot(typingDot3, 300)]).start();
     }
+  }, [isTyping]);
+
+  // Drive coach robot: Smiling while AI is typing, Happy for 2s when reply arrives.
+  useEffect(() => {
+    if (expressionTimerRef.current) {
+      clearTimeout(expressionTimerRef.current);
+      expressionTimerRef.current = null;
+    }
+    if (isTyping) {
+      setCoachExpression(1);
+    } else if (prevIsTypingRef.current) {
+      setCoachExpression(2);
+      expressionTimerRef.current = setTimeout(() => setCoachExpression(1), 2000);
+    }
+    prevIsTypingRef.current = isTyping;
+    return () => {
+      if (expressionTimerRef.current) clearTimeout(expressionTimerRef.current);
+    };
   }, [isTyping]);
 
   const addCoachMessage = useCallback((text: string, isProactive = false) => {
@@ -275,6 +297,18 @@ export default function AICoachScreen({ navigation }: Props) {
             </TouchableOpacity>
           ))}
         </ScrollView>
+
+        {/* Coach robot — floats above input bar, expression driven by typing state */}
+        <CoachRobot
+          expression={coachExpression}
+          size={72}
+          style={{
+            position: 'absolute',
+            right: 12,
+            bottom: keyboardHeight > 0 ? keyboardHeight + 70 : insets.bottom + 140,
+            zIndex: 10,
+          }}
+        />
 
         {/* Input bar */}
         <View style={[styles.inputBar, { paddingBottom: keyboardHeight > 0 ? 8 : insets.bottom + 72 }]}>

@@ -24,6 +24,7 @@ export interface WorkoutSession {
   score: number; // 0-100
   calories: number;
   formQuality: 'Excellent' | 'Good' | 'Fair' | 'Needs Work';
+  source?: 'live' | 'video';
 }
 
 export const EXERCISES: Record<ExerciseId, Exercise> = {

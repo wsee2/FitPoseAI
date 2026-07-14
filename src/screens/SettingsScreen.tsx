@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { setEnabled as ttsSetEnabled } from '../services/ttsService';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert, TextInput,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -24,6 +24,19 @@ interface SettingRow {
   onPress?: () => void;
   color?: string;
 }
+
+const GOAL_OPTIONS = [
+  { id: 'lose_weight',       label: 'Lose Weight',        emoji: '⚖️' },
+  { id: 'build_muscle',      label: 'Build Muscle',        emoji: '💪' },
+  { id: 'improve_endurance', label: 'Improve Endurance',   emoji: '🏃' },
+  { id: 'flexibility',       label: 'Flexibility',          emoji: '🤸' },
+];
+
+const LEVEL_OPTIONS = [
+  { id: 'beginner',     label: 'Beginner',     emoji: '🌱' },
+  { id: 'intermediate', label: 'Intermediate', emoji: '🔥' },
+  { id: 'advanced',     label: 'Advanced',     emoji: '⚡' },
+];
 
 const AVATAR_OPTIONS = [
   { id: 'male_athletic', label: 'Athletic Male', emoji: '🏋️‍♂️' },
@@ -63,6 +76,10 @@ export default function SettingsScreen({ navigation }: Props) {
   const [autoSave, setAutoSave] = useState(true);
   const [showAvatarPicker, setShowAvatarPicker] = useState(false);
   const [showVoicePicker, setShowVoicePicker] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameValue, setNameValue] = useState('');
+  const [showGoalPicker, setShowGoalPicker] = useState(false);
+  const [showLevelPicker, setShowLevelPicker] = useState(false);
 
   const goalLabels: Record<string, string> = {
     lose_weight: 'Lose Weight',
@@ -88,9 +105,9 @@ export default function SettingsScreen({ navigation }: Props) {
     {
       title: 'Profile',
       rows: [
-        { id: 'name', label: 'Name', subtitle: profile?.name ?? '—', icon: '👤', type: 'nav', onPress: () => {} },
-        { id: 'goal', label: 'Fitness Goal', subtitle: profile?.goal ? goalLabels[profile.goal] : '—', icon: '🎯', type: 'nav', onPress: () => {} },
-        { id: 'level', label: 'Experience Level', subtitle: profile?.level ? levelLabels[profile.level] : '—', icon: '📊', type: 'nav', onPress: () => {} },
+        { id: 'name', label: 'Name', subtitle: profile?.name ?? '—', icon: '👤', type: 'nav', onPress: () => { setNameValue(profile?.name ?? ''); setEditingName(!editingName); } },
+        { id: 'goal', label: 'Fitness Goal', subtitle: profile?.goal ? goalLabels[profile.goal] : '—', icon: '🎯', type: 'nav', onPress: () => setShowGoalPicker(!showGoalPicker) },
+        { id: 'level', label: 'Experience Level', subtitle: profile?.level ? levelLabels[profile.level] : '—', icon: '📊', type: 'nav', onPress: () => setShowLevelPicker(!showLevelPicker) },
       ],
     },
     {
@@ -118,15 +135,12 @@ export default function SettingsScreen({ navigation }: Props) {
       title: 'Privacy',
       rows: [
         { id: 'camera', label: 'Camera Access', subtitle: 'Required for pose detection', icon: '📷', type: 'nav', onPress: () => {} },
-        { id: 'data', label: 'Workout Data', subtitle: 'Manage your data in Firebase', icon: '🗄️', type: 'nav', onPress: () => {} },
-        { id: 'export', label: 'Export Data (CSV)', subtitle: 'Download your workout history', icon: '📁', type: 'nav', onPress: () => {} },
       ],
     },
     {
       title: 'About',
       rows: [
         { id: 'version', label: 'App Version', subtitle: '1.0.0 (Build 1)', icon: 'ℹ️', type: 'value' },
-        { id: 'feedback', label: 'Send Feedback', subtitle: 'Help us improve FitPose AI', icon: '💬', type: 'nav', onPress: () => {} },
         { id: 'reset', label: 'Reset All Data', subtitle: 'This cannot be undone', icon: '🗑️', type: 'danger', color: Colors.error, onPress: () => {
           Alert.alert('Reset Data', 'Are you sure you want to delete all workout data? This cannot be undone.', [
             { text: 'Cancel', style: 'cancel' },
@@ -239,6 +253,63 @@ export default function SettingsScreen({ navigation }: Props) {
                       ))}
                     </View>
                   )}
+
+                  {/* Name inline editor */}
+                  {row.id === 'name' && editingName && (
+                    <View style={styles.inlineEdit}>
+                      <TextInput
+                        style={styles.inlineInput}
+                        value={nameValue}
+                        onChangeText={setNameValue}
+                        autoFocus
+                        returnKeyType="done"
+                        onSubmitEditing={() => {
+                          if (nameValue.trim()) updateProfile({ name: nameValue.trim() });
+                          setEditingName(false);
+                        }}
+                        onBlur={() => {
+                          if (nameValue.trim()) updateProfile({ name: nameValue.trim() });
+                          setEditingName(false);
+                        }}
+                        placeholder="Enter your name"
+                        placeholderTextColor={Colors.textMuted}
+                      />
+                    </View>
+                  )}
+
+                  {/* Goal picker */}
+                  {row.id === 'goal' && showGoalPicker && (
+                    <View style={styles.picker}>
+                      {GOAL_OPTIONS.map((opt) => (
+                        <TouchableOpacity
+                          key={opt.id}
+                          style={[styles.pickerOption, profile?.goal === opt.id && styles.pickerOptionActive]}
+                          onPress={() => { updateProfile({ goal: opt.id as any }); setShowGoalPicker(false); }}
+                        >
+                          <Text style={styles.pickerEmoji}>{opt.emoji}</Text>
+                          <Text style={[styles.pickerLabel, profile?.goal === opt.id && { color: Colors.cyan }]}>{opt.label}</Text>
+                          {profile?.goal === opt.id && <Text style={styles.pickerCheck}>✓</Text>}
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
+
+                  {/* Level picker */}
+                  {row.id === 'level' && showLevelPicker && (
+                    <View style={styles.picker}>
+                      {LEVEL_OPTIONS.map((opt) => (
+                        <TouchableOpacity
+                          key={opt.id}
+                          style={[styles.pickerOption, profile?.level === opt.id && styles.pickerOptionActive]}
+                          onPress={() => { updateProfile({ level: opt.id as any }); setShowLevelPicker(false); }}
+                        >
+                          <Text style={styles.pickerEmoji}>{opt.emoji}</Text>
+                          <Text style={[styles.pickerLabel, profile?.level === opt.id && { color: Colors.cyan }]}>{opt.label}</Text>
+                          {profile?.level === opt.id && <Text style={styles.pickerCheck}>✓</Text>}
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
                 </React.Fragment>
               ))}
             </View>
@@ -278,6 +349,8 @@ const styles = StyleSheet.create({
   chevron: { fontSize: 20, color: Colors.textMuted },
   divider: { height: 1, backgroundColor: Colors.border, marginLeft: 64 },
   picker: { paddingHorizontal: 14, paddingBottom: 8, borderTopWidth: 1, borderTopColor: Colors.border, gap: 4 },
+  inlineEdit: { paddingHorizontal: 14, paddingBottom: 12, paddingTop: 4, borderTopWidth: 1, borderTopColor: Colors.border },
+  inlineInput: { backgroundColor: Colors.cardElevated, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, fontSize: 15, color: Colors.textPrimary, borderWidth: 1, borderColor: Colors.cyanGlow },
   pickerOption: { flexDirection: 'row', alignItems: 'center', padding: 10, gap: 10, borderRadius: 10 },
   pickerOptionActive: { backgroundColor: Colors.cyanDim },
   pickerEmoji: { fontSize: 22, width: 32, textAlign: 'center' },

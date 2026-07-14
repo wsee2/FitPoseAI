@@ -32,6 +32,7 @@ import { INITIAL_LUNGE_STATE, LungeFsm, type LungeFsmState } from '../services/f
 import { INITIAL_PLANK_STATE, PlankFsm, type PlankFsmState } from '../services/fsm/plankFsm';
 import { INITIAL_SITUP_STATE, SitupFsm, type SitupFsmState } from '../services/fsm/situpFsm';
 import SkeletonOverlay, { CONF_THRESHOLD, STATUS_COLORS, type SkeletonStatus } from '../components/SkeletonOverlay';
+import CoachRobot from '../components/CoachRobot';
 
 /** Pulls the exercise-specific (reps, score) pair out of whichever FSM is active. */
 function getFinalStats(
@@ -60,6 +61,10 @@ function getFinalStats(
 
 const INFER_EVERY_N_FRAMES = 1;
 const SMOOTHING_MS = 50;
+
+const ROBOT_DEBOUNCE_MS = 800;
+const ROBOT_HAPPY_DURATION_MS = 1500;
+const ROBOT_MIN_TRACKED_KPS = 8;
 
 function getCounterRotationDeg(orientation: Frame['orientation']): number {
   'worklet';
@@ -211,6 +216,12 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const [plankState, setPlankState] = useState<PlankFsmState>(INITIAL_PLANK_STATE);
   const situpFsmRef = useRef(new SitupFsm());
   const [situpState, setSitupState] = useState<SitupFsmState>(INITIAL_SITUP_STATE);
+
+  // Coach robot expression
+  const [coachExpression, setCoachExpression] = useState(1);
+  const coachExpressionRef = useRef(1);
+  const expressionLockedUntilRef = useRef(0);
+  const prevRepCountRef = useRef(0);
 
   // Session bookkeeping
   const sessionStartRef = useRef(Date.now());
@@ -373,6 +384,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       calories: Math.round(reps * exercise.calories),
       formQuality:
         score >= 90 ? 'Excellent' : score >= 75 ? 'Good' : score >= 60 ? 'Fair' : 'Needs Work',
+      source: 'live',
     };
     addWorkoutSession(session); // also persists to Firebase via AppContext
     // Fire proactive AI coaching message async — non-blocking, stores in context when ready.
@@ -630,6 +642,46 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     ? { left: 12, top: Math.round(previewHeight * 0.3), alignSelf: 'flex-start' as const }
     : { top: insets.top + 50, alignSelf: 'center' as const };
 
+  // Drive coach robot expression from FSM state + tracking quality.
+  // Runs after every render where phase/status/trackedCount/counters change.
+  useEffect(() => {
+    const now = Date.now();
+
+    // Rep just completed → flash Happy, lock for ROBOT_HAPPY_DURATION_MS.
+    if (phase === 'active' && exerciseId !== 'plank') {
+      const repCount =
+        exerciseId === 'squat'  ? squatState.counter  :
+        exerciseId === 'pushup' ? pushupState.counter :
+        exerciseId === 'lunge'  ? lungeState.counter  :
+        situpState.counter;
+      if (repCount > prevRepCountRef.current) {
+        prevRepCountRef.current = repCount;
+        coachExpressionRef.current = 2;
+        expressionLockedUntilRef.current = now + ROBOT_HAPPY_DURATION_MS;
+        setCoachExpression(2);
+        return;
+      }
+      prevRepCountRef.current = repCount;
+    }
+
+    if (now < expressionLockedUntilRef.current) return;
+
+    const desired =
+      phase !== 'active'                   ? 1 :  // Smiling — idle / calibrating
+      trackedCount < ROBOT_MIN_TRACKED_KPS ? 5 :  // Surprised — tracking lost
+      currentStatus === 'good'             ? 2 :  // Happy
+      currentStatus === 'error'            ? 4 :  // Scared
+      currentStatus === 'adjust'           ? 3 :  // Sad
+                                             1;   // Smiling — guide
+
+    if (desired !== coachExpressionRef.current) {
+      coachExpressionRef.current = desired;
+      expressionLockedUntilRef.current = now + ROBOT_DEBOUNCE_MS;
+      setCoachExpression(desired);
+    }
+  }, [phase, currentStatus, trackedCount, exerciseId,
+      squatState.counter, pushupState.counter, lungeState.counter, situpState.counter]);
+
   if (!hasPermission) {
     return (
       <View style={styles.centered}>
@@ -769,6 +821,13 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         pointerEvents="none"
         style={[StyleSheet.absoluteFill, styles.statusBorder, { borderColor: statusBorderColor, opacity: borderPulse }]}
       />
+
+      {/* Coach robot — FSM-driven expressions, non-interactive overlay */}
+      <CoachRobot
+        expression={coachExpression}
+        size={110}
+        style={[styles.coachRobot, { bottom: insets.bottom + 70 }]}
+      />
     </View>
   );
 }
@@ -902,5 +961,9 @@ const styles = StyleSheet.create({
   statusBorder: {
     borderWidth: 8,
     zIndex: 1000,
+  },
+  coachRobot: {
+    position: 'absolute',
+    right: 12,
   },
 });

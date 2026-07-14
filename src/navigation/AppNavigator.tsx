@@ -13,6 +13,7 @@ import {
   AnalyticsStackParamList,
   CoachStackParamList,
   SettingsStackParamList,
+  VideoStackParamList,
 } from './types';
 import { Colors } from '../theme';
 
@@ -29,6 +30,7 @@ import AnalyticsScreen from '../screens/AnalyticsScreen';
 import WorkoutHistoryScreen from '../screens/WorkoutHistoryScreen';
 import AICoachScreen from '../screens/AICoachScreen';
 import SettingsScreen from '../screens/SettingsScreen';
+import VideoAnalysisScreen from '../screens/VideoAnalysisScreen';
 
 const RootStack = createNativeStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator<MainTabParamList>();
@@ -36,6 +38,7 @@ const HomeStack = createNativeStackNavigator<HomeStackParamList>();
 const AnalyticsStack = createNativeStackNavigator<AnalyticsStackParamList>();
 const CoachStack = createNativeStackNavigator<CoachStackParamList>();
 const SettingsStack = createNativeStackNavigator<SettingsStackParamList>();
+const VideoStack = createNativeStackNavigator<VideoStackParamList>();
 
 const HomeNavigator = () => (
   <HomeStack.Navigator screenOptions={{ headerShown: false }}>
@@ -43,6 +46,7 @@ const HomeNavigator = () => (
     <HomeStack.Screen name="ExerciseSelect" component={ExerciseSelectScreen} />
     <HomeStack.Screen name="Workout" component={WorkoutScreen} />
     <HomeStack.Screen name="SessionSummary" component={SessionSummaryScreen} />
+    <HomeStack.Screen name="VideoAnalysis" component={VideoAnalysisScreen} />
   </HomeStack.Navigator>
 );
 
@@ -63,6 +67,12 @@ const SettingsNavigator = () => (
   <SettingsStack.Navigator screenOptions={{ headerShown: false }}>
     <SettingsStack.Screen name="Settings" component={SettingsScreen} />
   </SettingsStack.Navigator>
+);
+
+const VideoNavigator = () => (
+  <VideoStack.Navigator screenOptions={{ headerShown: false }}>
+    <VideoStack.Screen name="VideoAnalysis" component={VideoAnalysisScreen} />
+  </VideoStack.Navigator>
 );
 
 const HomeIcon = ({ color }: { color: string }) => (
@@ -86,6 +96,13 @@ const CoachIcon = ({ color }: { color: string }) => (
     <Path d="M4 20C4 17 7.58 14 12 14C16.42 14 20 17 20 20" stroke={color} strokeWidth="2" strokeLinecap="round" />
     <Path d="M19 8L21 6M19 6L21 8" stroke={color} strokeWidth="2" strokeLinecap="round" />
     <Circle cx="20" cy="4" r="2" stroke={color} strokeWidth="1.5" />
+  </Svg>
+);
+
+const VideoIcon = ({ color }: { color: string }) => (
+  <Svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+    <Rect x="2" y="6" width="14" height="12" rx="2" stroke={color} strokeWidth="2" />
+    <Path d="M16 9L22 6V18L16 15" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
   </Svg>
 );
 
@@ -117,6 +134,7 @@ const MainNavigator = () => {
         tabBarIcon: ({ color }) => {
           if (route.name === 'HomeTab') return <HomeIcon color={color} />;
           if (route.name === 'AnalyticsTab') return <AnalyticsIcon color={color} />;
+          if (route.name === 'VideoTab') return <VideoIcon color={color} />;
           if (route.name === 'CoachTab') return <CoachIcon color={color} />;
           return <SettingsIcon color={color} />;
         },
@@ -124,6 +142,7 @@ const MainNavigator = () => {
     >
       <Tab.Screen name="HomeTab" component={HomeNavigator} options={{ tabBarLabel: 'Home' }} />
       <Tab.Screen name="AnalyticsTab" component={AnalyticsNavigator} options={{ tabBarLabel: 'Progress' }} />
+      <Tab.Screen name="VideoTab" component={VideoNavigator} options={{ tabBarLabel: 'Video' }} />
       <Tab.Screen name="CoachTab" component={CoachNavigator} options={{ tabBarLabel: 'AI Coach' }} />
       <Tab.Screen name="SettingsTab" component={SettingsNavigator} options={{ tabBarLabel: 'Settings' }} />
     </Tab.Navigator>
