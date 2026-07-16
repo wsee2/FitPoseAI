@@ -9,7 +9,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Colors, BorderRadius } from '../theme';
 import { useApp } from '../context/AppContext';
-import CoachRobot from '../components/CoachRobot';
+import CoachAvatarCircle from '../components/CoachAvatarCircle';
 import { createChatSession, sendChatMessage, getTrendMessage } from '../services/aiCoach';
 import { speakImmediate } from '../services/ttsService';
 import type { CoachStackParamList } from '../navigation/types';
@@ -202,6 +202,10 @@ export default function AICoachScreen({ navigation }: Props) {
 
   const formatTime = (d: Date) => d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
+  // Only the most recent coach message gets the animated Rive avatar (Galaxy S8 perf).
+  // Older messages use the static SVG CoachAvatar.
+  const lastCoachMsgId = messages.filter(m => m.role === 'coach').slice(-1)[0]?.id;
+
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <View style={[styles.container, Platform.OS === 'android' ? { paddingBottom: keyboardHeight > 0 ? keyboardHeight + insets.bottom : 0 } : undefined]}>
@@ -210,7 +214,7 @@ export default function AICoachScreen({ navigation }: Props) {
         {/* Header */}
         <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
           <View style={styles.coachInfo}>
-            <CoachAvatar size={48} animated />
+            <CoachAvatarCircle size={48} expression={coachExpression} />
             <View>
               <Text style={styles.coachName}>FitPose AI Coach</Text>
               <View style={styles.onlineRow}>
@@ -246,7 +250,11 @@ export default function AICoachScreen({ navigation }: Props) {
         >
           {messages.map((msg) => (
             <View key={msg.id} style={[styles.messageRow, msg.role === 'user' && styles.messageRowUser]}>
-              {msg.role === 'coach' && <CoachAvatar size={36} />}
+              {msg.role === 'coach' && (
+                lastCoachMsgId === msg.id
+                  ? <CoachAvatarCircle size={36} expression={coachExpression} />
+                  : <CoachAvatar size={36} />
+              )}
               {msg.role === 'user' ? (
                 <LinearGradient colors={[Colors.cyan, '#0066FF']} style={[styles.bubble, styles.userBubble]}>
                   <Text style={[styles.bubbleText, styles.userBubbleText]}>{msg.text}</Text>
@@ -267,7 +275,7 @@ export default function AICoachScreen({ navigation }: Props) {
           {/* Typing indicator */}
           {isTyping && (
             <View style={styles.messageRow}>
-              <CoachAvatar size={36} />
+              <CoachAvatarCircle size={36} expression={coachExpression} />
               <View style={styles.typingBubble}>
                 {[typingDot1, typingDot2, typingDot3].map((dot, i) => (
                   <Animated.View
@@ -297,18 +305,6 @@ export default function AICoachScreen({ navigation }: Props) {
             </TouchableOpacity>
           ))}
         </ScrollView>
-
-        {/* Coach robot — floats above input bar, expression driven by typing state */}
-        <CoachRobot
-          expression={coachExpression}
-          size={72}
-          style={{
-            position: 'absolute',
-            right: 12,
-            bottom: keyboardHeight > 0 ? keyboardHeight + 70 : insets.bottom + 140,
-            zIndex: 10,
-          }}
-        />
 
         {/* Input bar */}
         <View style={[styles.inputBar, { paddingBottom: keyboardHeight > 0 ? 8 : insets.bottom + 72 }]}>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, Animated,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Animated, Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -29,22 +29,49 @@ type Props = {
 
 // ---------------------------------------------------------------------------
 // Analysis constants
-const SAMPLE_INTERVAL_MS = 500; // 2 fps equivalent — adequate for all 5 exercises
-const MAX_FRAMES = 120;         // cap at 60 seconds of video
+const SAMPLE_INTERVAL_MS = 500;  // 2 fps — adequate for all 5 exercises
+const MAX_FRAMES         = 120;  // cap at 60 seconds of video
 const MOVENET_INPUT_SIZE = 192;
 
-// Mirror the calibration check from WorkoutScreen (not exported from there).
-const VALIDITY_REQUIRED_KPS = [0, 5, 6, 11, 12, 13, 14]; // nose, shoulders, hips, knees
-const VALIDITY_CONF_THRESHOLD = 0.2;
-const VALIDITY_FRAME_MARGIN = 0.04;
-const VALIDITY_CHECK_FRAMES = 10;  // first N frames checked for body visibility
-const VALIDITY_MIN_RATIO = 0.5;    // at least 50% must show the full body
+// Body-visibility check — mirrors WorkoutScreen calibration (ankles excluded;
+// they clip at frame edges and are the least reliable keypoint).
+const VALIDITY_REQUIRED_KPS   = [0, 5, 6, 11, 12, 13, 14]; // nose, shoulders, hips, knees
+// Slightly lower than the live threshold (0.2): video is offline so we can be
+// more permissive; helps with subjects that are small or in dim lighting.
+const VALIDITY_CONF_THRESHOLD = 0.15;
+const VALIDITY_FRAME_MARGIN   = 0.04;
+
+// Usable-segment detection — samples ALL frames, then finds the longest
+// continuous block of valid frames.  Isolated bad frames (momentary occlusions,
+// pose noise) are absorbed up to SEGMENT_BAD_TOLERANCE before the segment breaks.
+//
+// SEGMENT_BAD_TOLERANCE — consecutive invalid frames allowed inside a segment.
+//   ↑ Increase if brief pose losses (arm crossing body) split the segment.
+//   ↓ Decrease if unrelated objects / background people extend segments.
+const SEGMENT_BAD_TOLERANCE       = 3;
+//
+// MIN_USABLE_SEGMENT_MS — minimum duration of the longest valid segment.
+//   Reject if the body is never fully visible for at least this long.
+//   ↑ Increase to require more exercise footage (e.g. 8000 for 8 s).
+//   ↓ Decrease to accept very short demonstration clips.
+const MIN_USABLE_SEGMENT_MS       = 5_000;
+//
+// MIN_USABLE_SEGMENT_FRACTION — usable segment must be at least this fraction
+//   of the total video duration.  Set to 0 to disable (rely only on the
+//   absolute minimum above).
+//   ↑ Raise if you want to reject videos where the person is only briefly visible.
+//   ↓ Lower if long-video users consistently have short usable windows.
+const MIN_USABLE_SEGMENT_FRACTION = 0.30;
+
+// Set false to silence per-frame keypoint logs (keep true during tuning).
+const DEBUG_VIDEO_ANALYSIS = true;
 
 // ---------------------------------------------------------------------------
 interface AnalysisResult {
   reps: number;        // rep count, or hold seconds for plank
   score: number;       // 0–100 (same convention as live mode)
   topFeedback: string[];
+  segmentMs: number;   // duration of the analyzed usable segment
 }
 
 interface SelectedVideo {
@@ -71,6 +98,50 @@ function checkBodyVisible(kp: number[]): boolean {
       x >= VALIDITY_FRAME_MARGIN && x <= 1 - VALIDITY_FRAME_MARGIN
     );
   });
+}
+
+/**
+ * Returns the start/end FRAME INDICES (inclusive) of the longest contiguous run
+ * of valid frames.  Up to `badTolerance` consecutive invalid frames are absorbed
+ * into the segment so brief pose losses do not split it.
+ * Returns { start: 0, end: -1 } when no valid frame exists.
+ */
+function findLongestSegment(
+  valid: boolean[],
+  badTolerance: number,
+): { start: number; end: number } {
+  let bestStart = 0;
+  let bestEnd   = -1;
+  let curStart  = -1;
+  let lastValidIdx   = -1;
+  let consecutiveBad = 0;
+
+  const tryCommit = () => {
+    if (curStart !== -1 && lastValidIdx >= curStart) {
+      if (lastValidIdx - curStart > bestEnd - bestStart) {
+        bestStart = curStart;
+        bestEnd   = lastValidIdx;
+      }
+    }
+  };
+
+  for (let i = 0; i < valid.length; i++) {
+    if (valid[i]) {
+      if (curStart === -1) curStart = i;
+      consecutiveBad = 0;
+      lastValidIdx   = i;
+    } else if (curStart !== -1) {
+      consecutiveBad++;
+      if (consecutiveBad > badTolerance) {
+        tryCommit();
+        curStart       = -1;
+        lastValidIdx   = -1;
+        consecutiveBad = 0;
+      }
+    }
+  }
+  tryCommit(); // flush any open segment at end of array
+  return { start: bestStart, end: bestEnd };
 }
 
 /** Extract one video frame, resize to 192×192, run MoveNet, return 51 keypoints or null. */
@@ -124,16 +195,22 @@ async function runMoveNetOnVideoFrame(
     const outputs = model.runSync([rgb.buffer]);
     const out = new Float32Array(outputs[0]!);
     return Array.from(out);
-  } catch {
+  } catch (err) {
+    console.warn('[VA] frame extraction error @' + timeMs + 'ms:', err);
     return null;
   } finally {
     // Clean up temp files regardless of outcome.
-    if (frameUri)  FileSystem.deleteAsync(frameUri,  { idempotent: true }).catch(() => {});
+    if (frameUri)   FileSystem.deleteAsync(frameUri,   { idempotent: true }).catch(() => {});
     if (resizedUri) FileSystem.deleteAsync(resizedUri, { idempotent: true }).catch(() => {});
   }
 }
 
-/** Process the video: extract frames, run MoveNet + FSM, return AnalysisResult. */
+/**
+ * Process the video: extract all frames (pass 1), find the longest contiguous
+ * segment where the body is fully visible, then run the exercise FSM on that
+ * segment only (pass 2).  Setup/teardown frames at the start/end of the video
+ * are automatically excluded.
+ */
 async function analyzeVideo(
   model: TensorflowModel,
   videoUri: string,
@@ -146,7 +223,100 @@ async function analyzeVideo(
     MAX_FRAMES,
   );
 
-  // Fresh FSM instance — no state from any prior session.
+  if (DEBUG_VIDEO_ANALYSIS) {
+    console.log(`[VA] starting: ${totalFrames} frames, uri scheme=${videoUri.substring(0, videoUri.indexOf('://') + 3)}`);
+  }
+
+  // ── PASS 1: extract frames & run MoveNet (the slow part — I/O bound) ──────
+  const frameKps: (number[] | null)[] = [];
+  let maxNoseConf = 0; // tracks whether anyone was ever detected (for error messages)
+
+  for (let i = 0; i < totalFrames; i++) {
+    await new Promise<void>(r => setTimeout(r, 0)); // yield so progress bar updates
+    onProgress((i + 0.5) / totalFrames * 0.85);     // progress: 0 → 85 %
+
+    const kp = await runMoveNetOnVideoFrame(model, videoUri, i * SAMPLE_INTERVAL_MS);
+    frameKps.push(kp);
+
+    if (kp) {
+      const noseConf = kp[2] ?? 0; // keypoint 0: [y, x, conf] at indices [0,1,2]
+      if (noseConf > maxNoseConf) maxNoseConf = noseConf;
+
+      if (DEBUG_VIDEO_ANALYSIS) {
+        const badKps = VALIDITY_REQUIRED_KPS.filter(j => {
+          const conf = kp[j * 3 + 2] ?? 0;
+          const y    = kp[j * 3]     ?? 0;
+          const x    = kp[j * 3 + 1] ?? 0;
+          return !(
+            conf >= VALIDITY_CONF_THRESHOLD &&
+            y >= VALIDITY_FRAME_MARGIN && y <= 1 - VALIDITY_FRAME_MARGIN &&
+            x >= VALIDITY_FRAME_MARGIN && x <= 1 - VALIDITY_FRAME_MARGIN
+          );
+        });
+        console.log(
+          `[VA] f${i} @${i * SAMPLE_INTERVAL_MS}ms` +
+          ` valid=${badKps.length === 0}` +
+          ` nose=${noseConf.toFixed(2)}` +
+          (badKps.length > 0
+            ? ` badKps=[${badKps.map(j => `${j}:${(kp[j*3+2]??0).toFixed(2)}`).join(',')}]`
+            : ''),
+        );
+      }
+    } else if (DEBUG_VIDEO_ANALYSIS) {
+      console.log(`[VA] f${i} @${i * SAMPLE_INTERVAL_MS}ms null (extraction failed)`);
+    }
+  }
+
+  // If every frame returned null, the video file itself could not be decoded —
+  // this is an EXTRACTION failure, not a pose-estimation or visibility failure.
+  // Surface it explicitly so the UI never shows a misleading "No person detected".
+  if (frameKps.every(kp => kp === null)) {
+    if (DEBUG_VIDEO_ANALYSIS) console.log('[VA] REJECT: EXTRACTION_FAILED (0 frames decoded)');
+    throw new Error('EXTRACTION_FAILED');
+  }
+
+  // ── Find longest contiguous valid segment ─────────────────────────────────
+  const validFlags = frameKps.map(kp => kp != null && checkBodyVisible(kp));
+  const { start: segStart, end: segEnd } = findLongestSegment(validFlags, SEGMENT_BAD_TOLERANCE);
+
+  // segEnd = -1 when no valid frame was found
+  const segmentMs = segEnd >= segStart
+    ? (segEnd - segStart + 1) * SAMPLE_INTERVAL_MS
+    : 0;
+
+  if (DEBUG_VIDEO_ANALYSIS) {
+    const validCount = validFlags.filter(Boolean).length;
+    console.log(
+      `[VA] segment: f${segStart}–f${segEnd}` +
+      ` (${segStart * SAMPLE_INTERVAL_MS}–${segEnd * SAMPLE_INTERVAL_MS}ms, ${segmentMs}ms)` +
+      ` validFrames=${validCount}/${totalFrames}` +
+      ` fraction=${(segmentMs / durationMs).toFixed(2)}`,
+    );
+  }
+
+  // ── Acceptance check ──────────────────────────────────────────────────────
+  const fractionOk =
+    MIN_USABLE_SEGMENT_FRACTION <= 0 ||
+    segmentMs / durationMs >= MIN_USABLE_SEGMENT_FRACTION;
+
+  if (segmentMs < MIN_USABLE_SEGMENT_MS || !fractionOk) {
+    // Classify the rejection cause so the UI can show an actionable message.
+    const reason =
+      maxNoseConf < 0.15 ? 'NO_PERSON'         : // no detectable person in the video
+      segmentMs   === 0  ? 'BODY_PARTIAL'       : // person present but body never fully in frame
+                           'SEGMENT_TOO_SHORT';   // visible segment too short
+    if (DEBUG_VIDEO_ANALYSIS) {
+      console.log(`[VA] REJECT: ${reason} (maxNose=${maxNoseConf.toFixed(2)} segMs=${segmentMs})`);
+    }
+    throw new Error(reason);
+  }
+
+  if (DEBUG_VIDEO_ANALYSIS) {
+    console.log(`[VA] ACCEPT: analyzing f${segStart}–f${segEnd} (${segmentMs}ms)`);
+  }
+
+  // ── PASS 2: run exercise FSM on the usable segment only ───────────────────
+  // This pass is very fast (pure computation, no I/O); it completes in < 1 s.
   const fsm: SquatFsm | PushupFsm | LungeFsm | PlankFsm | SitupFsm =
     exerciseId === 'squat'  ? new SquatFsm()  :
     exerciseId === 'pushup' ? new PushupFsm() :
@@ -156,29 +326,21 @@ async function analyzeVideo(
 
   let lastState: any = null;
   const feedbackCounts: Record<string, number> = {};
-  let validBodyFrames = 0;
-  let checkedFrames = 0;
-  let goodPlankFrames = 0; // for plank: count frames in hold (PlankFsm uses wall clock, not video time)
+  let goodPlankFrames = 0;
 
-  for (let i = 0; i < totalFrames; i++) {
-    // Yield to the event loop so the progress bar can re-render between frames.
+  const segLen = segEnd - segStart + 1;
+  for (let i = segStart; i <= segEnd; i++) {
     await new Promise<void>(r => setTimeout(r, 0));
-    onProgress(i / totalFrames);
+    onProgress(0.85 + (i - segStart + 1) / segLen * 0.15); // 85 → 100 %
 
-    const kp = await runMoveNetOnVideoFrame(model, videoUri, i * SAMPLE_INTERVAL_MS);
-    if (!kp) continue;
+    const kp = frameKps[i];
+    if (!kp) continue; // bad frame absorbed within tolerance — skip FSM update
 
-    // Validity check: only on the first VALIDITY_CHECK_FRAMES frames.
-    if (i < VALIDITY_CHECK_FRAMES) {
-      checkedFrames++;
-      if (checkBodyVisible(kp)) validBodyFrames++;
-    }
-
-    // FSM update — portrait orientation → identity transform (same as live portrait mode).
+    // Portrait orientation → identity transform (same as live portrait mode).
     lastState = fsm.update(kp);
 
-    // Plank hold tracking: use frame count × sample interval, not FSM's holdSeconds
-    // (FSM uses Date.now() which tracks processing time, not video time).
+    // Plank: count frames in hold × sample interval (FSM uses Date.now() internally,
+    // so holdSeconds would track processing time, not video time).
     if (exerciseId === 'plank' && (lastState as any).isHolding) goodPlankFrames++;
 
     // Accumulate form feedback (skip generic cues).
@@ -189,31 +351,25 @@ async function analyzeVideo(
   }
 
   onProgress(1);
-
-  // Reject if body was not adequately visible.
-  if (checkedFrames === 0 || validBodyFrames / checkedFrames < VALIDITY_MIN_RATIO) {
-    throw new Error('BODY_NOT_VISIBLE');
-  }
   if (!lastState) throw new Error('NO_FRAMES_PROCESSED');
 
-  // Final metrics — match live-mode conventions exactly.
+  // ── Final metrics — match live-mode conventions exactly ───────────────────
   let reps: number;
   let score: number;
   if (exerciseId === 'plank') {
     reps  = Math.round(goodPlankFrames * (SAMPLE_INTERVAL_MS / 1000));
-    score = reps; // live mode: score = holdSeconds
+    score = reps;
   } else {
     reps  = (lastState as any).counter ?? 0;
     score = Math.min(100, (lastState as any).score ?? 0);
   }
 
-  // Top-3 form issues by frequency.
   const topFeedback = Object.entries(feedbackCounts)
     .sort(([, a], [, b]) => b - a)
     .slice(0, 3)
     .map(([msg]) => msg);
 
-  return { reps, score, topFeedback };
+  return { reps, score, topFeedback, segmentMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +391,8 @@ export default function VideoAnalysisScreen({ navigation, route }: Props) {
   const [savedToHistory, setSavedToHistory] = useState(false);
 
   const progressBarWidth = useRef(new Animated.Value(0)).current;
+  // Tracks a video file we copied to local cache (needs cleanup when done).
+  const localCopyUriRef = useRef<string | null>(null);
 
   // Load model on mount (singleton — won't re-download if already loaded by WorkoutScreen).
   useEffect(() => {
@@ -261,7 +419,8 @@ export default function VideoAnalysisScreen({ navigation, route }: Props) {
     }
 
     const picked = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Videos,
+      // 'videos' string literal (not the deprecated MediaTypeOptions enum).
+      mediaTypes: 'videos' as ImagePicker.MediaType,
       allowsEditing: false,
       quality: 1,
     });
@@ -269,8 +428,36 @@ export default function VideoAnalysisScreen({ navigation, route }: Props) {
     if (picked.canceled || !picked.assets?.[0]) return;
 
     const asset = picked.assets[0];
+
+    // Discard any previously cached local copy.
+    if (localCopyUriRef.current) {
+      FileSystem.deleteAsync(localCopyUriRef.current, { idempotent: true }).catch(() => {});
+      localCopyUriRef.current = null;
+    }
+
+    // On Android, expo-image-picker returns content:// URIs (Android Photo Picker /
+    // MediaStore).  expo-video-thumbnails' MediaMetadataRetriever fails to open a
+    // file descriptor for those URIs from inside its Dispatchers.IO coroutine —
+    // openFileDescriptor() returns null or throws SecurityException, leaving the
+    // retriever without a data source, so every getFrameAtTime() call returns null.
+    // Copying to the local cache gives a file:// path that always works.
+    let resolvedUri = asset.uri;
+    if (Platform.OS === 'android' && asset.uri.startsWith('content://')) {
+      try {
+        const ext = (asset.mimeType ?? '').toLowerCase().includes('quicktime') ? 'mov' : 'mp4';
+        const dest = `${FileSystem.cacheDirectory}va_input.${ext}`;
+        await FileSystem.copyAsync({ from: asset.uri, to: dest });
+        localCopyUriRef.current = dest;
+        resolvedUri = dest;
+        console.log('[VA] copied content:// to local cache:', dest);
+      } catch (copyErr) {
+        console.warn('[VA] content:// → local copy failed, will try original URI:', copyErr);
+        // Keep original URI — frame extraction logging will surface the real error.
+      }
+    }
+
     setSelectedVideo({
-      uri: asset.uri,
+      uri: resolvedUri,
       durationMs: asset.duration ?? 60_000,
       fileName: asset.fileName ?? 'video',
     });
@@ -297,15 +484,18 @@ export default function VideoAnalysisScreen({ navigation, route }: Props) {
       setResult(res);
       setPhase('done');
     } catch (err: any) {
-      if (err?.message === 'BODY_NOT_VISIBLE') {
-        setErrorMsg(
-          'Body not fully visible — less than half the sampled frames showed your head, shoulders, hips, and knees. Please record your whole body in frame and try again.',
-        );
-      } else {
-        setErrorMsg(
-          'Analysis failed. Please try a different video. Make sure it is a standard MP4/MOV recorded in portrait mode.',
-        );
-      }
+      const msg = err?.message;
+      setErrorMsg(
+        msg === 'EXTRACTION_FAILED'
+          ? "Couldn't read this video — make sure it's a standard MP4 or MOV file and try again."
+          : msg === 'NO_PERSON'
+          ? "No person detected — make sure you're in frame and the area is well lit."
+          : msg === 'BODY_PARTIAL'
+          ? "Your whole body wasn't visible. Move further back so your head, shoulders, hips, and knees are all in frame."
+          : msg === 'SEGMENT_TOO_SHORT'
+          ? "Not enough usable footage — record a longer clip with your full body visible throughout."
+          : 'Analysis failed. Please try a different video (MP4 or MOV, portrait mode).',
+      );
       setPhase('error');
     }
   }, [selectedVideo, model, selectedExercise, updateProgress]);
@@ -329,6 +519,11 @@ export default function VideoAnalysisScreen({ navigation, route }: Props) {
   }, [result, selectedVideo, selectedExercise, addWorkoutSession, savedToHistory]);
 
   const resetToIdle = useCallback(() => {
+    // Clean up local video copy when the user discards this video.
+    if (localCopyUriRef.current) {
+      FileSystem.deleteAsync(localCopyUriRef.current, { idempotent: true }).catch(() => {});
+      localCopyUriRef.current = null;
+    }
     setPhase('idle');
     setResult(null);
     setSavedToHistory(false);
@@ -337,10 +532,6 @@ export default function VideoAnalysisScreen({ navigation, route }: Props) {
   }, [updateProgress]);
 
   const exercise = EXERCISES[selectedExercise];
-  const analyzedSeconds = Math.min(
-    Math.round((selectedVideo?.durationMs ?? 0) / 1000),
-    MAX_FRAMES * SAMPLE_INTERVAL_MS / 1000,
-  );
   const canAnalyze = !!selectedVideo && !!model && phase === 'idle';
 
   // ---------------------------------------------------------------------------
@@ -490,10 +681,10 @@ export default function VideoAnalysisScreen({ navigation, route }: Props) {
             </View>
           )}
 
-          {/* Portrait mode note */}
+          {/* Segment note */}
           <View style={styles.noteCard}>
             <Text style={styles.noteText}>
-              📹 Analyzed {analyzedSeconds}s at 2 fps · Portrait mode · No overlay playback
+              📹 Analyzed {Math.round(result.segmentMs / 1000)}s of usable footage at 2 fps · Portrait mode
             </Text>
           </View>
 

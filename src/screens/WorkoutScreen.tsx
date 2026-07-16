@@ -32,7 +32,7 @@ import { INITIAL_LUNGE_STATE, LungeFsm, type LungeFsmState } from '../services/f
 import { INITIAL_PLANK_STATE, PlankFsm, type PlankFsmState } from '../services/fsm/plankFsm';
 import { INITIAL_SITUP_STATE, SitupFsm, type SitupFsmState } from '../services/fsm/situpFsm';
 import SkeletonOverlay, { CONF_THRESHOLD, STATUS_COLORS, type SkeletonStatus } from '../components/SkeletonOverlay';
-import CoachRobot from '../components/CoachRobot';
+import CoachAvatarCircle from '../components/CoachAvatarCircle';
 
 /** Pulls the exercise-specific (reps, score) pair out of whichever FSM is active. */
 function getFinalStats(
@@ -65,6 +65,19 @@ const SMOOTHING_MS = 50;
 const ROBOT_DEBOUNCE_MS = 800;
 const ROBOT_HAPPY_DURATION_MS = 1500;
 const ROBOT_MIN_TRACKED_KPS = 8;
+
+// ── WORKOUT SCREEN ROBOT LAYOUT ──────────────────────────────────────────────
+// WORKOUT_ROBOT_SIZE — circular avatar diameter in dp.
+//   Increase for a bigger coach presence; decrease if it covers the preview.
+const WORKOUT_ROBOT_SIZE  = 90;
+// WORKOUT_ROBOT_RIGHT — dp from the right edge of the screen.
+//   Keep close to the Finish button (right: 20) so they align visually.
+const WORKOUT_ROBOT_RIGHT = 12;
+// WORKOUT_ROBOT_TOP_OFFSET — dp below the top safe-area inset.
+//   The Finish button occupies insets.top+12 … insets.top+~56.
+//   This value places the avatar just below it with a small gap.
+const WORKOUT_ROBOT_TOP_OFFSET = 64;
+// ────────────────────────────────────────────────────────────────────────────
 
 function getCounterRotationDeg(orientation: Frame['orientation']): number {
   'worklet';
@@ -638,9 +651,10 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         ).length
       : 0;
 
+  // Portrait: anchor left so the rep panel doesn't overlap the robot avatar (top-right).
   const repPanelDynamicStyle = isLandscape
     ? { left: 12, top: Math.round(previewHeight * 0.3), alignSelf: 'flex-start' as const }
-    : { top: insets.top + 50, alignSelf: 'center' as const };
+    : { left: 12, top: insets.top + 50, alignSelf: 'flex-start' as const };
 
   // Drive coach robot expression from FSM state + tracking quality.
   // Runs after every render where phase/status/trackedCount/counters change.
@@ -822,12 +836,20 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         style={[StyleSheet.absoluteFill, styles.statusBorder, { borderColor: statusBorderColor, opacity: borderPulse }]}
       />
 
-      {/* Coach robot — FSM-driven expressions, non-interactive overlay */}
-      <CoachRobot
-        expression={coachExpression}
-        size={110}
-        style={[styles.coachRobot, { bottom: insets.bottom + 70 }]}
-      />
+      {/* Circular coach avatar — top-right, below the Finish button.
+          zIndex 1001 renders above the status border ring (zIndex 1000).
+          Tune WORKOUT_ROBOT_SIZE / WORKOUT_ROBOT_RIGHT / WORKOUT_ROBOT_TOP_OFFSET above. */}
+      <View
+        pointerEvents="none"
+        style={{
+          position: 'absolute',
+          right: WORKOUT_ROBOT_RIGHT,
+          top: insets.top + WORKOUT_ROBOT_TOP_OFFSET,
+          zIndex: 1001,
+        }}
+      >
+        <CoachAvatarCircle size={WORKOUT_ROBOT_SIZE} expression={coachExpression} />
+      </View>
     </View>
   );
 }
@@ -961,9 +983,5 @@ const styles = StyleSheet.create({
   statusBorder: {
     borderWidth: 8,
     zIndex: 1000,
-  },
-  coachRobot: {
-    position: 'absolute',
-    right: 12,
   },
 });
