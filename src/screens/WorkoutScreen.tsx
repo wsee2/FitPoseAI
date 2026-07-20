@@ -9,6 +9,7 @@ import {
 import type { Frame } from 'react-native-vision-camera';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RouteProp } from '@react-navigation/native';
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NitroModules } from 'react-native-nitro-modules';
 import { useRunOnJS, useSharedValue } from 'react-native-worklets-core';
@@ -152,6 +153,33 @@ const CALIB_HORIZONTAL_SPREAD = 0.2;
 // Exercises that require a horizontal body posture.
 const HORIZONTAL_EXERCISES = new Set(['pushup', 'plank']);
 
+// ── LIGHTING DETECTION (confidence as lighting proxy) ─────────────────────────
+// Number of recent calibration frames kept in the rolling confidence window.
+// Larger = more stable signal, slower response; 20 frames ≈ 0.7 s at ~30 fps.
+const LIGHTING_SAMPLE_FRAMES  = 20;
+// Mean keypoint confidence below this (while a person is present) indicates poor
+// lighting. Well-lit scenes typically average > 0.45; dim ones drop below 0.3.
+const LIGHTING_LOW_CONF       = 0.35;
+// Consecutive frames the rolling avg must stay below LIGHTING_LOW_CONF before the
+// hint is shown. Combined latency ≈ (LIGHTING_SAMPLE_FRAMES + LIGHTING_SUSTAIN_FRAMES).
+const LIGHTING_SUSTAIN_FRAMES = 15;
+// Minimum confidence for any single keypoint in {nose, L-shoulder, R-shoulder} to
+// count as "person present". Prevents firing the hint on a completely empty frame.
+const LIGHTING_PERSON_FLOOR   = 0.10;
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── PERFORMANCE HUD ───────────────────────────────────────────────────────────
+// Set to false before your FYP presentation to hide the on-screen perf overlay.
+// [PERF] console logs are also suppressed when false.
+const PERF_HUD_ENABLED     = true;
+// Ring-buffer depth for rolling averages (FPS, latencies).
+// 30 samples ≈ 1 s at 30 fps — large enough to be stable, small enough to react.
+const PERF_AVG_WINDOW      = 30;
+// How often (ms) a [PERF] summary is printed to the Metro console for copy-paste
+// into FYP Chapter 4 tables.
+const PERF_LOG_INTERVAL_MS = 5_000;
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Returns { valid, guidance } based on fsmKp (world-upright normalized keypoints).
  * Called on every frame during 'calibrating' and 'countdown' phases.
@@ -204,6 +232,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const { width: previewWidth, height: previewHeight } = useWindowDimensions();
   const isLandscape = previewWidth > previewHeight;
   const insets = useSafeAreaInsets();
+  const tabBarHeight = useBottomTabBarHeight();
   const { hasPermission, requestPermission } = useCameraPermission();
   const { addWorkoutSession, workoutHistory, setLastCoachMessage } = useApp();
   const frontDevice = useCameraDevice('front');
@@ -253,8 +282,22 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const calibGuidanceRef = useRef('Step into the frame'); // guards against duplicate setState calls
 
   const [countdownNum, setCountdownNum] = useState(3);
+  const [showLightingHint, setShowLightingHint] = useState(false);
+  const [perfHud, setPerfHud] = useState({ camFps: 0, inferFps: 0, inferMs: 0, resizeMs: 0, totalMs: 0 });
   const stableFramesRef = useRef(0);
   const badFramesRef = useRef(0); // consecutive invalid frames; resets stable counter only after CALIB_BAD_TOLERANCE
+  // Lighting hint refs — all used inside the updateKeypoints closure via stable ref identity.
+  const lightingConfBufferRef   = useRef<number[]>([]);
+  const lightingSustainCountRef = useRef(0);
+  const lightingHintSpokenRef   = useRef(false);
+  const showLightingHintRef     = useRef(false); // mirrors showLightingHint for stale-closure safety
+  // Perf HUD ring buffers — updated on JS thread in updateKeypoints.
+  const perfInferTsRef   = useRef<number[]>([]);  // inference call timestamps
+  const perfCamFcRef     = useRef<number[]>([]);  // total frame count at each inference
+  const perfInferMsRef   = useRef<number[]>([]);  // per-inference runSync latency (ms)
+  const perfResizeMsRef  = useRef<number[]>([]);  // per-inference resize latency (ms)
+  const lastPerfUpdateRef = useRef(0);             // last timestamp we called setPerfHud
+  const lastPerfLogRef    = useRef(0);             // last timestamp we logged [PERF]
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Scale animation for the countdown digit.
@@ -275,6 +318,16 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     }
     Animated.timing(borderPulse, { toValue: 1, duration: 200, useNativeDriver: true }).start();
   }, [phase]);
+
+  // Clear lighting hint when the workout goes active — it's calibration-only.
+  useEffect(() => {
+    if (phase === 'active') {
+      showLightingHintRef.current = false;
+      setShowLightingHint(false);
+      lightingConfBufferRef.current = [];
+      lightingSustainCountRef.current = 0;
+    }
+  }, [phase]);
   // ---------------------------------------------------------------------------
 
   // Reset the active exercise's FSM (and calibration state) whenever the screen is entered.
@@ -293,6 +346,21 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     }
     stableFramesRef.current = 0;
     badFramesRef.current = 0;
+
+    // Reset lighting hint state
+    lightingConfBufferRef.current = [];
+    lightingSustainCountRef.current = 0;
+    lightingHintSpokenRef.current = false;
+    showLightingHintRef.current = false;
+    setShowLightingHint(false);
+
+    // Reset perf HUD ring buffers
+    perfInferTsRef.current  = [];
+    perfCamFcRef.current    = [];
+    perfInferMsRef.current  = [];
+    perfResizeMsRef.current = [];
+    lastPerfUpdateRef.current = 0;
+    lastPerfLogRef.current    = 0;
 
     // Reset FSMs
     switch (exerciseId) {
@@ -446,10 +514,71 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   // Reads phaseRef.current (stable ref object) so this closure never needs re-creation
   // for phase changes — only exerciseId changes recreate it.
   const updateKeypoints = useRunOnJS(
-    (kp: number[], inferMs: number, resizeMsArg: number, orientationDeg: number) => {
+    (kp: number[], inferMs: number, resizeMsArg: number, orientationDeg: number, totalFrames: number) => {
       setKeypoints(kp);
       setInferenceMs(inferMs);
       setResizeMs(resizeMsArg);
+
+      // ── Performance HUD tracking ────────────────────────────────────────────
+      // All work here is on the JS thread; ring buffers are plain arrays in refs.
+      if (PERF_HUD_ENABLED) {
+        const now = Date.now();
+
+        // Push inference timestamp and total camera frame count into ring buffers.
+        const push = <T,>(buf: T[], val: T) => {
+          buf.push(val);
+          if (buf.length > PERF_AVG_WINDOW) buf.shift();
+        };
+        push(perfInferTsRef.current,  now);
+        push(perfCamFcRef.current,    totalFrames);
+        push(perfInferMsRef.current,  inferMs);
+        push(perfResizeMsRef.current, resizeMsArg);
+
+        // Update display once per second to avoid per-frame re-renders.
+        if (now - lastPerfUpdateRef.current >= 1000) {
+          lastPerfUpdateRef.current = now;
+
+          const ts = perfInferTsRef.current;
+          const fc = perfCamFcRef.current;
+          const n  = ts.length;
+
+          // Inference FPS: (n-1) events over the span between first and last timestamp.
+          const inferFps = n >= 2
+            ? Math.round((n - 1) / ((ts[n - 1]! - ts[0]!) / 1000))
+            : 0;
+
+          // Camera FPS: total camera frames delivered over the same span.
+          const camFps = n >= 2 && fc.length >= 2
+            ? Math.round((fc[n - 1]! - fc[0]!) / ((ts[n - 1]! - ts[0]!) / 1000))
+            : 0;
+
+          const avg = (buf: number[]) =>
+            buf.length > 0 ? buf.reduce((a, b) => a + b, 0) / buf.length : 0;
+
+          const avgInfer  = avg(perfInferMsRef.current);
+          const avgResize = avg(perfResizeMsRef.current);
+          const avgTotal  = avgInfer + avgResize;
+
+          setPerfHud({
+            camFps,
+            inferFps,
+            inferMs:  Math.round(avgInfer),
+            resizeMs: Math.round(avgResize),
+            totalMs:  Math.round(avgTotal),
+          });
+
+          // Periodic Metro log — copy these rows into FYP Chapter 4.
+          if (now - lastPerfLogRef.current >= PERF_LOG_INTERVAL_MS) {
+            lastPerfLogRef.current = now;
+            console.log(
+              `[PERF] camFPS=${camFps} inferFPS=${inferFps}` +
+              ` inferMs=${avgInfer.toFixed(1)}(avg) resizeMs=${avgResize.toFixed(1)}(avg)` +
+              ` totalMs=${avgTotal.toFixed(1)}(avg) throttle=every ${INFER_EVERY_N_FRAMES} frames`
+            );
+          }
+        }
+      }
+      // ───────────────────────────────────────────────────────────────────────
 
       // (a) Display copy — overlay transform, portrait = identity.
       let displayKp: number[];
@@ -524,6 +653,55 @@ export default function WorkoutScreen({ navigation, route }: Props) {
           }
           speakFeedback(guidance);
         }
+
+        // ── Lighting hint (confidence as lighting proxy) ───────────────────
+        // Gate: is any part of the person detectable? Prevents misfiring on
+        // empty frames (an empty room has near-zero confidence too).
+        const noseConf       = fsmKp[0 * 3 + 2] ?? 0;
+        const lShoulderConf  = fsmKp[5 * 3 + 2] ?? 0;
+        const rShoulderConf  = fsmKp[6 * 3 + 2] ?? 0;
+        const personInFrame  = noseConf       > LIGHTING_PERSON_FLOOR ||
+                               lShoulderConf  > LIGHTING_PERSON_FLOOR ||
+                               rShoulderConf  > LIGHTING_PERSON_FLOOR;
+
+        if (personInFrame) {
+          // Mean confidence of the same keypoints used for calibration.
+          const meanConf =
+            CALIB_REQUIRED_KPS.reduce((sum, idx) => sum + (fsmKp[idx * 3 + 2] ?? 0), 0) /
+            CALIB_REQUIRED_KPS.length;
+
+          const buf = lightingConfBufferRef.current;
+          buf.push(meanConf);
+          if (buf.length > LIGHTING_SAMPLE_FRAMES) buf.shift();
+
+          if (buf.length >= LIGHTING_SAMPLE_FRAMES) {
+            const rollingAvg = buf.reduce((a, b) => a + b, 0) / buf.length;
+            if (rollingAvg < LIGHTING_LOW_CONF) {
+              lightingSustainCountRef.current += 1;
+              if (lightingSustainCountRef.current >= LIGHTING_SUSTAIN_FRAMES &&
+                  !showLightingHintRef.current) {
+                showLightingHintRef.current = true;
+                setShowLightingHint(true);
+                if (!lightingHintSpokenRef.current) {
+                  lightingHintSpokenRef.current = true;
+                  speakImmediate('Lighting looks dim — try turning on more lights');
+                }
+              }
+            } else {
+              // Confidence recovered — hide hint and reset sustain counter.
+              lightingSustainCountRef.current = 0;
+              if (showLightingHintRef.current) {
+                showLightingHintRef.current = false;
+                setShowLightingHint(false);
+              }
+            }
+          }
+        } else {
+          // Person absent: reset buffer so empty-frame data doesn't pollute the avg.
+          lightingConfBufferRef.current = [];
+          lightingSustainCountRef.current = 0;
+        }
+        // ──────────────────────────────────────────────────────────────────────
         return; // Never call FSMs during calibration.
       }
 
@@ -622,7 +800,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       const inferElapsedMs = Date.now() - inferStartedAt;
 
       const out = new Float32Array(outputs[0]!);
-      updateKeypoints(Array.from(out), inferElapsedMs, resizeElapsedMs, deviceOrientationDeg.value);
+      updateKeypoints(Array.from(out), inferElapsedMs, resizeElapsedMs, deviceOrientationDeg.value, frameCount.value);
     },
     [boxedModel, frameCount, deviceOrientationDeg, resize, updateKeypoints]
   );
@@ -766,6 +944,11 @@ export default function WorkoutScreen({ navigation, route }: Props) {
               />
             </View>
           )}
+          {showLightingHint && (
+            <Text style={styles.lightingHint}>
+              💡 Lighting looks dim — turn on more lights for better tracking
+            </Text>
+          )}
         </View>
       )}
 
@@ -835,6 +1018,27 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         pointerEvents="none"
         style={[StyleSheet.absoluteFill, styles.statusBorder, { borderColor: statusBorderColor, opacity: borderPulse }]}
       />
+
+      {/* Performance HUD — MUST come after statusBorder in JSX and use zIndex > 1000
+          so the absoluteFill status-border layer doesn't paint over it on Android.
+          Set PERF_HUD_ENABLED=false before your FYP presentation to hide this. */}
+      {PERF_HUD_ENABLED && (
+        <View
+          pointerEvents="none"
+          style={[
+            styles.perfHud,
+            phase === 'active'
+              ? { bottom: tabBarHeight + 12 }   // bottom-left: rep panel occupies top-left
+              : { top: insets.top + 12 },        // top-left: calib panel occupies bottom-center
+          ]}
+        >
+          <Text style={styles.perfHudText}>
+            {`cam ${perfHud.camFps} fps  inf ${perfHud.inferFps} fps\n` +
+             `infer ${perfHud.inferMs}ms  resize ${perfHud.resizeMs}ms\n` +
+             `total ${perfHud.totalMs}ms  1:${INFER_EVERY_N_FRAMES}`}
+          </Text>
+        </View>
+      )}
 
       {/* Circular coach avatar — top-right, below the Finish button.
           zIndex 1001 renders above the status border ring (zIndex 1000).
@@ -983,5 +1187,32 @@ const styles = StyleSheet.create({
   statusBorder: {
     borderWidth: 8,
     zIndex: 1000,
+  },
+  lightingHint: {
+    color: '#FFD60A',
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 10,
+    opacity: 0.9,
+  },
+  perfHud: {
+    position: 'absolute',
+    // bottom is set inline from useBottomTabBarHeight() so it sits above the tab bar.
+    left: 12,
+    zIndex: 1002, // above statusBorder (1000) and avatar (1001); both are in other corners
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.25)',
+  },
+  perfHudText: {
+    color: '#00E5FF',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    lineHeight: 16,
+    opacity: 0.9,
   },
 });

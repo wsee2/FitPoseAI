@@ -7,11 +7,11 @@ import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle, Path, Rect as SvgRect } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import * as Clipboard from 'expo-clipboard';
 import { Colors, BorderRadius } from '../theme';
 import { useApp } from '../context/AppContext';
 import CoachAvatarCircle from '../components/CoachAvatarCircle';
 import { createChatSession, sendChatMessage, getTrendMessage } from '../services/aiCoach';
-import { speakImmediate } from '../services/ttsService';
 import type { CoachStackParamList } from '../navigation/types';
 
 type Props = { navigation: NativeStackNavigationProp<CoachStackParamList, 'AICoach'> };
@@ -73,7 +73,7 @@ export default function AICoachScreen({ navigation }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
   const typingDot1 = useRef(new Animated.Value(0)).current;
@@ -172,6 +172,12 @@ export default function AICoachScreen({ navigation }: Props) {
     };
   }, [isTyping]);
 
+  const handleCopy = useCallback((text: string, id: string) => {
+    Clipboard.setStringAsync(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(prev => (prev === id ? null : prev)), 1500);
+  }, []);
+
   const addCoachMessage = useCallback((text: string, isProactive = false) => {
     const msg: Message = {
       id: Date.now().toString(),
@@ -181,9 +187,8 @@ export default function AICoachScreen({ navigation }: Props) {
       isProactive,
     };
     setMessages(prev => [...prev, msg]);
-    if (voiceEnabled) speakImmediate(text);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
-  }, [voiceEnabled]);
+  }, []);
 
   const handleSend = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim();
@@ -223,12 +228,6 @@ export default function AICoachScreen({ navigation }: Props) {
               </View>
             </View>
           </View>
-          <TouchableOpacity
-            style={[styles.voiceBtn, voiceEnabled && styles.voiceBtnActive]}
-            onPress={() => setVoiceEnabled(v => !v)}
-          >
-            <Text style={styles.voiceIcon}>{voiceEnabled ? '🔊' : '🔇'}</Text>
-          </TouchableOpacity>
         </View>
 
         {/* Streak banner */}
@@ -255,20 +254,28 @@ export default function AICoachScreen({ navigation }: Props) {
                   ? <CoachAvatarCircle size={36} expression={coachExpression} />
                   : <CoachAvatar size={36} />
               )}
-              {msg.role === 'user' ? (
-                <LinearGradient colors={[Colors.cyan, '#0066FF']} style={[styles.bubble, styles.userBubble]}>
-                  <Text style={[styles.bubbleText, styles.userBubbleText]}>{msg.text}</Text>
-                  <Text style={[styles.bubbleTime, { color: 'rgba(0,0,0,0.5)' }]}>{formatTime(msg.timestamp)}</Text>
-                </LinearGradient>
-              ) : (
-                <View style={[styles.bubble, styles.coachBubble, msg.isProactive && styles.proactiveBubble]}>
-                  {msg.isProactive && (
-                    <Text style={styles.proactiveLabel}>Coach Insight</Text>
-                  )}
-                  <Text style={[styles.bubbleText, styles.coachBubbleText]}>{msg.text}</Text>
-                  <Text style={styles.bubbleTime}>{formatTime(msg.timestamp)}</Text>
-                </View>
-              )}
+              <TouchableOpacity
+                onLongPress={() => handleCopy(msg.text, msg.id)}
+                delayLongPress={400}
+                activeOpacity={0.75}
+              >
+                {msg.role === 'user' ? (
+                  <LinearGradient colors={[Colors.cyan, '#0066FF']} style={[styles.bubble, styles.userBubble]}>
+                    <Text style={[styles.bubbleText, styles.userBubbleText]}>{msg.text}</Text>
+                    <Text style={[styles.bubbleTime, { color: 'rgba(0,0,0,0.5)' }]}>{formatTime(msg.timestamp)}</Text>
+                    {copiedId === msg.id && <Text style={styles.copiedHint}>Copied ✓</Text>}
+                  </LinearGradient>
+                ) : (
+                  <View style={[styles.bubble, styles.coachBubble, msg.isProactive && styles.proactiveBubble]}>
+                    {msg.isProactive && (
+                      <Text style={styles.proactiveLabel}>Coach Insight</Text>
+                    )}
+                    <Text style={[styles.bubbleText, styles.coachBubbleText]}>{msg.text}</Text>
+                    <Text style={styles.bubbleTime}>{formatTime(msg.timestamp)}</Text>
+                    {copiedId === msg.id && <Text style={styles.copiedHint}>Copied ✓</Text>}
+                  </View>
+                )}
+              </TouchableOpacity>
             </View>
           ))}
 
@@ -349,17 +356,14 @@ const styles = StyleSheet.create({
   onlineRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
   onlineDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: Colors.success },
   onlineText: { fontSize: 11, color: Colors.success, fontWeight: '600' },
-  voiceBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: Colors.cyanDim, borderWidth: 1, borderColor: Colors.cyanGlow, alignItems: 'center', justifyContent: 'center' },
-  voiceBtnActive: { backgroundColor: Colors.cyan, borderColor: Colors.cyan },
-  voiceIcon: { fontSize: 18 },
   streakBanner: { marginHorizontal: 20, marginBottom: 8, borderRadius: BorderRadius.lg, overflow: 'hidden', borderWidth: 1, borderColor: Colors.cyanGlow },
   streakGrad: { paddingVertical: 8, paddingHorizontal: 14 },
   streakText: { fontSize: 12, color: Colors.cyan, fontWeight: '600' },
   messageList: { flex: 1 },
-  messageContent: { paddingHorizontal: 16, paddingVertical: 12, gap: 14 },
+  messageContent: { paddingHorizontal: 12, paddingVertical: 3, gap: 12 },
   messageRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
   messageRowUser: { flexDirection: 'row-reverse' },
-  bubble: { maxWidth: '75%', borderRadius: 20, padding: 12, paddingHorizontal: 16 },
+  bubble: { maxWidth: '85%', borderRadius: 20, padding: 12, paddingHorizontal: 16 },
   coachBubble: { backgroundColor: Colors.card, borderWidth: 1, borderColor: Colors.border, borderBottomLeftRadius: 4 },
   proactiveBubble: { borderColor: Colors.cyanGlow, backgroundColor: 'rgba(0,229,255,0.06)' },
   proactiveLabel: { fontSize: 10, fontWeight: '700', color: Colors.cyan, letterSpacing: 0.8, textTransform: 'uppercase', marginBottom: 5 },
@@ -368,15 +372,16 @@ const styles = StyleSheet.create({
   userBubbleText: { color: Colors.textInverse },
   bubbleText: { fontSize: 15, lineHeight: 22 },
   bubbleTime: { fontSize: 10, color: Colors.textMuted, marginTop: 4, alignSelf: 'flex-end' },
+  copiedHint: { fontSize: 11, fontWeight: '600', color: Colors.cyan, marginTop: 4, alignSelf: 'flex-end' },
   typingBubble: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: Colors.card, borderRadius: 20, padding: 14, paddingHorizontal: 18, borderWidth: 1, borderColor: Colors.border },
   typingDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: Colors.textMuted },
-  quickPrompts: { maxHeight: 48, marginBottom: 8 },
+  quickPrompts: { maxHeight: 40, marginBottom: 8 },
   quickPromptsContent: { paddingHorizontal: 16, gap: 8 },
   quickPrompt: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: BorderRadius.full, backgroundColor: Colors.card, borderWidth: 1, borderColor: Colors.border },
   quickPromptDisabled: { opacity: 0.4 },
   quickPromptText: { fontSize: 13, color: Colors.textSecondary, fontWeight: '500' },
-  inputBar: { paddingHorizontal: 16, paddingTop: 8, flexDirection: 'row', gap: 10, alignItems: 'flex-end' },
-  inputContainer: { flex: 1, backgroundColor: Colors.card, borderRadius: 22, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: 16, paddingVertical: 12, maxHeight: 120 },
+  inputBar: { paddingHorizontal: 16, paddingTop: 3, flexDirection: 'row', gap: 8, alignItems: 'flex-end' },
+  inputContainer: { flex: 1, backgroundColor: Colors.card, borderRadius: 22, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: 16, paddingVertical: 1, maxHeight: 120 },
   textInput: { fontSize: 15, color: Colors.textPrimary },
   sendBtn: { borderRadius: 22, overflow: 'hidden' },
   sendBtnDisabled: { opacity: 0.4 },

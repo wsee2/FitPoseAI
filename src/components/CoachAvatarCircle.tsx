@@ -155,9 +155,17 @@ export default function CoachAvatarCircle({ size, expression }: Props) {
                 backgroundColor: 'transparent',
               }}
               onError={(e: RNRiveError) => {
-                if (e.type === RNRiveErrorType.DataBindingError) return;
-                console.warn('[CoachAvatarCircle]', e.type, e.message);
-                setHasError(true);
+                // Only fall back to static SVG when the file itself is unreadable.
+                // Other errors (wrong state machine name, unused assets, bad inputs)
+                // are non-fatal — the animation still plays; just log them.
+                const fatal =
+                  e.type === RNRiveErrorType.FileNotFound ||
+                  e.type === RNRiveErrorType.MalformedFile ||
+                  e.type === RNRiveErrorType.IncorrectRiveFileUrl ||
+                  e.type === RNRiveErrorType.UnsupportedRuntimeVersion;
+                console.warn('[CoachAvatarCircle]', e.type, e.message,
+                  fatal ? '→ showing fallback' : '→ continuing (non-fatal)');
+                if (fatal) setHasError(true);
               }}
             />
           </RiveBoundary>

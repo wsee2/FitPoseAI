@@ -7,7 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as ImageManipulator from 'expo-image-manipulator';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as jpeg from 'jpeg-js';
 import type { TensorflowModel } from 'react-native-fast-tflite';
 import { loadMoveNetModel } from '../services/moveNet';
@@ -65,6 +65,13 @@ const MIN_USABLE_SEGMENT_FRACTION = 0.30;
 
 // Set false to silence per-frame keypoint logs (keep true during tuning).
 const DEBUG_VIDEO_ANALYSIS = true;
+
+// How many times to feed each video frame into the FSM before moving to the next.
+// The live camera FSMs use a SMOOTH_WINDOW=5 buffer designed for ~30 fps (≈167 ms/frame).
+// At SAMPLE_INTERVAL_MS=500 ms each video frame represents ~16 camera frames, so
+// repeating the FSM update that many times fills the buffer with the current angle
+// rather than blending it with angles from different parts of the rep cycle.
+const VIDEO_FSM_REPS = Math.ceil(SAMPLE_INTERVAL_MS / 33);
 
 // ---------------------------------------------------------------------------
 interface AnalysisResult {
@@ -144,6 +151,36 @@ function findLongestSegment(
   return { start: bestStart, end: bestEnd };
 }
 
+/**
+ * Remaps MoveNet keypoints from stretched-image coordinates to square coordinates.
+ *
+ * The live WorkoutScreen uses vision-camera-resize-plugin which auto-center-crops the
+ * camera frame to a 1:1 square before scaling to 192×192.  Keypoint (y, x) values
+ * therefore live in a space where 1 y-unit == 1 x-unit in physical pixels.
+ *
+ * Video frames are stretch-resized to 192×192 without any crop, so the coordinate
+ * space is aspect-ratio-distorted.  This function applies the equivalent centre-crop
+ * coordinate transform so FSM angle thresholds (calibrated for the live square space)
+ * remain valid.  Coordinates may exceed [0, 1] for keypoints outside the centre
+ * square; that is intentional — it preserves the correct physical angles.
+ */
+function correctAspectRatio(kp: number[], srcW: number, srcH: number): number[] {
+  if (srcW === srcH) return kp;
+  const corrected = kp.slice();
+  if (srcH > srcW) {
+    // Portrait: y spans more physical pixels per unit than x → expand y
+    const scale  = srcW / srcH;
+    const offset = (1 - scale) / 2;
+    for (let i = 0; i < 17; i++) corrected[i * 3]     = (kp[i * 3]!     - offset) / scale;
+  } else {
+    // Landscape: x spans more physical pixels per unit than y → expand x
+    const scale  = srcH / srcW;
+    const offset = (1 - scale) / 2;
+    for (let i = 0; i < 17; i++) corrected[i * 3 + 1] = (kp[i * 3 + 1]! - offset) / scale;
+  }
+  return corrected;
+}
+
 /** Extract one video frame, resize to 192×192, run MoveNet, return 51 keypoints or null. */
 async function runMoveNetOnVideoFrame(
   model: TensorflowModel,
@@ -159,6 +196,8 @@ async function runMoveNetOnVideoFrame(
       quality: 0.8,
     });
     frameUri = thumb.uri;
+    const thumbW = thumb.width;
+    const thumbH = thumb.height;
 
     // 2. Resize to 192×192 before decoding — avoids decoding a full-resolution JPEG in JS.
     const manip = await ImageManipulator.manipulateAsync(
@@ -194,7 +233,9 @@ async function runMoveNetOnVideoFrame(
     // 7. Run MoveNet on JS thread (runSync is safe here; each call is ~20–50 ms).
     const outputs = model.runSync([rgb.buffer]);
     const out = new Float32Array(outputs[0]!);
-    return Array.from(out);
+    // Remap coordinates to the same square (1:1) space produced by the live
+    // camera pipeline's centre-crop resize, so FSM thresholds stay valid.
+    return correctAspectRatio(Array.from(out), thumbW, thumbH);
   } catch (err) {
     console.warn('[VA] frame extraction error @' + timeMs + 'ms:', err);
     return null;
@@ -336,8 +377,15 @@ async function analyzeVideo(
     const kp = frameKps[i];
     if (!kp) continue; // bad frame absorbed within tolerance — skip FSM update
 
-    // Portrait orientation → identity transform (same as live portrait mode).
-    lastState = fsm.update(kp);
+    // Feed the FSM VIDEO_FSM_REPS times per video frame.
+    // Each FSM has a SMOOTH_WINDOW=5 rolling buffer sized for ~30 fps live camera
+    // (5 × 33 ms ≈ 167 ms).  At SAMPLE_INTERVAL_MS=500 ms each video frame
+    // represents ~16 camera frames, so a single FSM call would blend the current
+    // angle with angles from adjacent rep-cycle phases, masking peaks.
+    // Repeating the call fills the buffer with the current frame's angle only.
+    for (let r = 0; r < VIDEO_FSM_REPS; r++) {
+      lastState = fsm.update(kp);
+    }
 
     // Plank: count frames in hold × sample interval (FSM uses Date.now() internally,
     // so holdSeconds would track processing time, not video time).
@@ -447,12 +495,18 @@ export default function VideoAnalysisScreen({ navigation, route }: Props) {
         const ext = (asset.mimeType ?? '').toLowerCase().includes('quicktime') ? 'mov' : 'mp4';
         const dest = `${FileSystem.cacheDirectory}va_input.${ext}`;
         await FileSystem.copyAsync({ from: asset.uri, to: dest });
-        localCopyUriRef.current = dest;
-        resolvedUri = dest;
-        console.log('[VA] copied content:// to local cache:', dest);
+        const info = await FileSystem.getInfoAsync(dest);
+        if (info.exists && (info as { exists: true; size: number }).size > 0) {
+          localCopyUriRef.current = dest;
+          resolvedUri = dest;
+          console.log('[VA] copied content:// to local cache:', dest,
+            `(${(info as { exists: true; size: number }).size} bytes)`);
+        } else {
+          console.warn('[VA] copy produced empty/missing file — using content:// directly');
+        }
       } catch (copyErr) {
-        console.warn('[VA] content:// → local copy failed, will try original URI:', copyErr);
-        // Keep original URI — frame extraction logging will surface the real error.
+        console.warn('[VA] content:// → local copy failed — using content:// directly:', copyErr);
+        // content:// URI is now handled by setDataSource(context, uri) in native module.
       }
     }
 
