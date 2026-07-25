@@ -21,6 +21,7 @@ import { ExerciseIcon } from '../components/ui/ExerciseIcon';
 import { NeonButton } from '../components/ui/NeonButton';
 import { ProgressRing } from '../components/ui/ProgressRing';
 import { EXERCISES, type ExerciseId, type WorkoutSession } from '../data/exercises';
+import { todayMYTDateStr } from '../utils/mytDate';
 import { useApp } from '../context/AppContext';
 type Props = {
   navigation: { goBack: () => void; canGoBack: () => boolean };
@@ -560,7 +561,7 @@ export default function VideoAnalysisScreen({ navigation, route }: Props) {
     const session: WorkoutSession = {
       id: Date.now().toString(),
       exerciseId: selectedExercise,
-      date: new Date().toISOString().split('T')[0],
+      date: todayMYTDateStr(),
       reps: result.reps,
       duration: Math.round(Math.min(selectedVideo.durationMs, MAX_FRAMES * SAMPLE_INTERVAL_MS) / 1000),
       score: result.score,

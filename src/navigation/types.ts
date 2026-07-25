@@ -35,6 +35,7 @@ export type HomeStackParamList = {
 export type AnalyticsStackParamList = {
   Analytics: undefined;
   WorkoutHistory: undefined;
+  ScoreDetail: { mode: 'weekly' | 'monthly' };
 };
 
 export type SettingsStackParamList = {
@@ -55,6 +56,8 @@ export type WorkoutNavigationProp = NativeStackNavigationProp<HomeStackParamList
 export type SessionSummaryNavigationProp = NativeStackNavigationProp<HomeStackParamList, 'SessionSummary'>;
 export type AnalyticsNavigationProp = NativeStackNavigationProp<AnalyticsStackParamList, 'Analytics'>;
 export type WorkoutHistoryNavigationProp = NativeStackNavigationProp<AnalyticsStackParamList, 'WorkoutHistory'>;
+export type ScoreDetailNavigationProp = NativeStackNavigationProp<AnalyticsStackParamList, 'ScoreDetail'>;
+export type ScoreDetailRouteProp = RouteProp<AnalyticsStackParamList, 'ScoreDetail'>;
 export type AICoachNavigationProp = NativeStackNavigationProp<CoachStackParamList, 'AICoach'>;
 export type SettingsNavigationProp = NativeStackNavigationProp<SettingsStackParamList, 'Settings'>;
 

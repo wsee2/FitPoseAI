@@ -25,6 +25,7 @@ import { loadMoveNetModel } from '../services/moveNet';
 import { useApp } from '../context/AppContext';
 import { getSessionEndMessage } from '../services/aiCoach';
 import { EXERCISES, formatDuration, type WorkoutSession } from '../data/exercises';
+import { todayMYTDateStr } from '../utils/mytDate';
 
 import { speakFeedback, speakImmediate, reset as ttsReset } from '../services/ttsService';
 import { INITIAL_SQUAT_STATE, SquatFsm, type SquatFsmState } from '../services/fsm/squatFsm';
@@ -458,7 +459,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     const session: WorkoutSession = {
       id: Date.now().toString(),
       exerciseId,
-      date: new Date().toISOString().split('T')[0],
+      date: todayMYTDateStr(),
       reps,
       duration,
       score,

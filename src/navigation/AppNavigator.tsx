@@ -31,6 +31,7 @@ import WorkoutHistoryScreen from '../screens/WorkoutHistoryScreen';
 import AICoachScreen from '../screens/AICoachScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import VideoAnalysisScreen from '../screens/VideoAnalysisScreen';
+import ScoreDetailScreen from '../screens/ScoreDetailScreen';
 
 const RootStack = createNativeStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator<MainTabParamList>();
@@ -54,6 +55,7 @@ const AnalyticsNavigator = () => (
   <AnalyticsStack.Navigator screenOptions={{ headerShown: false }}>
     <AnalyticsStack.Screen name="Analytics" component={AnalyticsScreen} />
     <AnalyticsStack.Screen name="WorkoutHistory" component={WorkoutHistoryScreen} />
+    <AnalyticsStack.Screen name="ScoreDetail" component={ScoreDetailScreen} />
   </AnalyticsStack.Navigator>
 );
 

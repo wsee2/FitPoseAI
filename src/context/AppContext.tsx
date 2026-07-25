@@ -4,6 +4,7 @@ import { ExerciseId, WorkoutSession } from '../data/exercises';
 import { subscribeToAuthState, logout } from '../services/firebaseAuth';
 import { loadProfile, saveProfile, patchProfile } from '../services/firebaseProfile';
 import { saveSession, loadSessions } from '../services/firebaseWorkout';
+import { todayMYTDateStr } from '../utils/mytDate';
 
 export type Gender = 'male' | 'female' | 'other';
 export type FitnessGoal = 'lose_weight' | 'build_muscle' | 'improve_endurance' | 'flexibility';
@@ -141,7 +142,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const session: WorkoutSession = {
       id: Date.now().toString(),
       exerciseId: activeWorkout.exerciseId,
-      date: new Date().toISOString().split('T')[0],
+      date: todayMYTDateStr(),
       reps: activeWorkout.reps, duration,
       score: activeWorkout.score,
       calories: Math.round(activeWorkout.reps * 0.3),

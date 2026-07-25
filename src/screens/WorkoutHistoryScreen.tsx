@@ -10,6 +10,7 @@ import { ExerciseIcon } from '../components/ui/ExerciseIcon';
 import { useApp } from '../context/AppContext';
 import { EXERCISES, formatDuration, getScoreGrade, ExerciseId } from '../data/exercises';
 import { getHistory, type WorkoutRecord } from '../services/firebaseWorkout';
+import { nowInMYT, mytDateStr } from '../utils/mytDate';
 import type { AnalyticsStackParamList } from '../navigation/types';
 
 type Props = { navigation: NativeStackNavigationProp<AnalyticsStackParamList, 'WorkoutHistory'> };
@@ -56,11 +57,11 @@ export default function WorkoutHistoryScreen({ navigation }: Props) {
   const groupedEntries = Object.entries(grouped).sort((a, b) => b[0].localeCompare(a[0]));
 
   const formatDate = (d: string) => {
-    const today = new Date().toISOString().split('T')[0];
-    const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+    const today = mytDateStr(nowInMYT());
+    const yesterday = mytDateStr(new Date(nowInMYT().getTime() - 86400000));
     if (d === today) return 'Today';
     if (d === yesterday) return 'Yesterday';
-    return new Date(d).toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+    return new Date(`${d}T00:00:00.000Z`).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'UTC' });
   };
 
   return (
