@@ -205,30 +205,9 @@ export default function HomeScreen({ navigation }: Props) {
             })}
           </View>
 
-          {/* Video Analysis teaser */}
-          <TouchableOpacity
-            activeOpacity={0.88}
-            onPress={() => navigation.navigate('VideoAnalysis', {})}
-            style={{ marginBottom: 12 }}
-          >
-            <LinearGradient
-              colors={['#0D1A0D', '#091209']}
-              style={[styles.coachTeaser, { borderColor: 'rgba(0,210,106,0.25)' }]}
-            >
-              <LinearGradient
-                colors={['rgba(0,210,106,0.15)', 'transparent']}
-                style={StyleSheet.absoluteFill}
-              />
-              <View style={styles.coachTeaserContent}>
-                <Text style={styles.coachTeaserEmoji}>🎥</Text>
-                <View>
-                  <Text style={styles.coachTeaserTitle}>Analyze a Video</Text>
-                  <Text style={styles.coachTeaserSub}>Upload a clip · get rep count + form score</Text>
-                </View>
-                <Text style={[styles.coachArrow, { color: '#00D26A' }]}>›</Text>
-              </View>
-            </LinearGradient>
-          </TouchableOpacity>
+          {/* Video Analysis teaser — hidden — feature deprioritised, see report future work.
+              VideoAnalysisScreen and its navigation route still exist; restore this block
+              and the VideoTab registration in AppNavigator.tsx to bring the feature back. */}
 
           {/* AI Coach teaser */}
           <TouchableOpacity

@@ -152,37 +152,7 @@ function findLongestSegment(
   return { start: bestStart, end: bestEnd };
 }
 
-/**
- * Remaps MoveNet keypoints from stretched-image coordinates to square coordinates.
- *
- * The live WorkoutScreen uses vision-camera-resize-plugin which auto-center-crops the
- * camera frame to a 1:1 square before scaling to 192×192.  Keypoint (y, x) values
- * therefore live in a space where 1 y-unit == 1 x-unit in physical pixels.
- *
- * Video frames are stretch-resized to 192×192 without any crop, so the coordinate
- * space is aspect-ratio-distorted.  This function applies the equivalent centre-crop
- * coordinate transform so FSM angle thresholds (calibrated for the live square space)
- * remain valid.  Coordinates may exceed [0, 1] for keypoints outside the centre
- * square; that is intentional — it preserves the correct physical angles.
- */
-function correctAspectRatio(kp: number[], srcW: number, srcH: number): number[] {
-  if (srcW === srcH) return kp;
-  const corrected = kp.slice();
-  if (srcH > srcW) {
-    // Portrait: y spans more physical pixels per unit than x → expand y
-    const scale  = srcW / srcH;
-    const offset = (1 - scale) / 2;
-    for (let i = 0; i < 17; i++) corrected[i * 3]     = (kp[i * 3]!     - offset) / scale;
-  } else {
-    // Landscape: x spans more physical pixels per unit than y → expand x
-    const scale  = srcH / srcW;
-    const offset = (1 - scale) / 2;
-    for (let i = 0; i < 17; i++) corrected[i * 3 + 1] = (kp[i * 3 + 1]! - offset) / scale;
-  }
-  return corrected;
-}
-
-/** Extract one video frame, resize to 192×192, run MoveNet, return 51 keypoints or null. */
+/** Extract one video frame, letterbox-pad + resize to 192×192, run MoveNet, return 51 keypoints or null. */
 async function runMoveNetOnVideoFrame(
   model: TensorflowModel,
   videoUri: string,
@@ -200,15 +170,22 @@ async function runMoveNetOnVideoFrame(
     const thumbW = thumb.width;
     const thumbH = thumb.height;
 
-    // 2. Resize to 192×192 before decoding — avoids decoding a full-resolution JPEG in JS.
+    // 2. Resize preserving aspect ratio (longer edge → 192), no cropping and no stretch.
+    // A center-crop (matching the live pipeline's square crop) would discard real content —
+    // whenever the subject fills more of the frame (e.g. moving closer/lower to squat),
+    // their feet get cropped out entirely, starving the FSM of ankle keypoints for the rest
+    // of the clip. Letterbox padding (below) keeps 100% of the frame, and a uniform-scale
+    // resize introduces no aspect distortion, so no post-hoc angle correction is needed.
+    const contentW = thumbH >= thumbW ? Math.round((MOVENET_INPUT_SIZE * thumbW) / thumbH) : MOVENET_INPUT_SIZE;
+    const contentH = thumbH >= thumbW ? MOVENET_INPUT_SIZE : Math.round((MOVENET_INPUT_SIZE * thumbH) / thumbW);
     const manip = await ImageManipulator.manipulateAsync(
       frameUri,
-      [{ resize: { width: MOVENET_INPUT_SIZE, height: MOVENET_INPUT_SIZE } }],
+      [{ resize: { width: contentW, height: contentH } }],
       { format: ImageManipulator.SaveFormat.JPEG, compress: 0.85 },
     );
     resizedUri = manip.uri;
 
-    // 3. Read 192×192 JPEG as base64 (~5–15 KB).
+    // 3. Read the resized JPEG as base64.
     const base64 = await FileSystem.readAsStringAsync(resizedUri, {
       encoding: FileSystem.EncodingType.Base64,
     });
@@ -220,23 +197,29 @@ async function runMoveNetOnVideoFrame(
       jpegBytes[i] = binary.charCodeAt(i);
     }
 
-    // 5. JPEG → RGBA pixels (jpeg-js pure JS, fast for 192×192).
+    // 5. JPEG → RGBA pixels (jpeg-js pure JS, fast for this size).
     const { data: rgba } = jpeg.decode(jpegBytes, { useTArray: true });
 
-    // 6. RGBA → RGB (MoveNet expects rgb uint8).
+    // 6. Paste into a black 192×192 canvas, centered — the actual letterbox/pillarbox pad.
     const rgb = new Uint8Array(MOVENET_INPUT_SIZE * MOVENET_INPUT_SIZE * 3);
-    for (let p = 0; p < MOVENET_INPUT_SIZE * MOVENET_INPUT_SIZE; p++) {
-      rgb[p * 3]     = rgba[p * 4]!;
-      rgb[p * 3 + 1] = rgba[p * 4 + 1]!;
-      rgb[p * 3 + 2] = rgba[p * 4 + 2]!;
+    const padX = Math.floor((MOVENET_INPUT_SIZE - contentW) / 2);
+    const padY = Math.floor((MOVENET_INPUT_SIZE - contentH) / 2);
+    for (let row = 0; row < contentH; row++) {
+      const srcRowStart = row * contentW;
+      const dstRowStart = (row + padY) * MOVENET_INPUT_SIZE + padX;
+      for (let col = 0; col < contentW; col++) {
+        const srcP = (srcRowStart + col) * 4;
+        const dstP = (dstRowStart + col) * 3;
+        rgb[dstP]     = rgba[srcP]!;
+        rgb[dstP + 1] = rgba[srcP + 1]!;
+        rgb[dstP + 2] = rgba[srcP + 2]!;
+      }
     }
 
     // 7. Run MoveNet on JS thread (runSync is safe here; each call is ~20–50 ms).
     const outputs = model.runSync([rgb.buffer]);
     const out = new Float32Array(outputs[0]!);
-    // Remap coordinates to the same square (1:1) space produced by the live
-    // camera pipeline's centre-crop resize, so FSM thresholds stay valid.
-    return correctAspectRatio(Array.from(out), thumbW, thumbH);
+    return Array.from(out);
   } catch (err) {
     console.warn('[VA] frame extraction error @' + timeMs + 'ms:', err);
     return null;
@@ -378,6 +361,13 @@ async function analyzeVideo(
     const kp = frameKps[i];
     if (!kp) continue; // bad frame absorbed within tolerance — skip FSM update
 
+    if (DEBUG_VIDEO_ANALYSIS && exerciseId === 'squat') {
+      const names = ['nose', 'L_sh', 'R_sh', 'L_hip', 'R_hip', 'L_knee', 'R_knee', 'L_ankle', 'R_ankle'];
+      const idxs  = [0, 5, 6, 11, 12, 13, 14, 15, 16];
+      const confs = idxs.map((k, n) => `${names[n]}=${(kp[k * 3 + 2] ?? 0).toFixed(2)}`).join(' ');
+      console.log(`[VA-FSM] f${i} @${i * SAMPLE_INTERVAL_MS}ms preState=${(lastState as any)?.stage ?? 'null'} ${confs}`);
+    }
+
     // Feed the FSM VIDEO_FSM_REPS times per video frame.
     // Each FSM has a SMOOTH_WINDOW=5 rolling buffer sized for ~30 fps live camera
     // (5 × 33 ms ≈ 167 ms).  At SAMPLE_INTERVAL_MS=500 ms each video frame
@@ -386,6 +376,11 @@ async function analyzeVideo(
     // Repeating the call fills the buffer with the current frame's angle only.
     for (let r = 0; r < VIDEO_FSM_REPS; r++) {
       lastState = fsm.update(kp);
+    }
+
+    if (DEBUG_VIDEO_ANALYSIS && exerciseId === 'squat') {
+      const s = lastState as any;
+      console.log(`[VA-FSM] f${i} → stage=${s.stage} counter=${s.counter} angle=${s.kneeAngle?.toFixed(1)} feedback="${s.feedback}"`);
     }
 
     // Plank: count frames in hold × sample interval (FSM uses Date.now() internally,

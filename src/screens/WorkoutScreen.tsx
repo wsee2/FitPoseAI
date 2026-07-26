@@ -238,7 +238,16 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const { addWorkoutSession, workoutHistory, setLastCoachMessage } = useApp();
   const frontDevice = useCameraDevice('front');
   const backDevice = useCameraDevice('back');
-  const device = frontDevice ?? backDevice;
+  const liveDevice = frontDevice ?? backDevice;
+  // Cache the last known-good device. useCameraDevice can momentarily report undefined
+  // during a transient hardware hiccup (e.g. the camera service restarting after a
+  // "session/recoverable-error") even though the device itself never actually went away.
+  // Without this, that single blip would unmount <Camera> and strand the user on the
+  // "No camera device found" screen — short-circuiting VisionCamera's own built-in
+  // session recovery, which only works if the component stays mounted.
+  const lastGoodDeviceRef = useRef(liveDevice);
+  if (liveDevice) lastGoodDeviceRef.current = liveDevice;
+  const device = liveDevice ?? lastGoodDeviceRef.current;
 
   const [model, setModel] = useState<TensorflowModel | null>(null);
   const [keypoints, setKeypoints] = useState<number[]>([]);

@@ -47,7 +47,9 @@ const HomeNavigator = () => (
     <HomeStack.Screen name="ExerciseSelect" component={ExerciseSelectScreen} />
     <HomeStack.Screen name="Workout" component={WorkoutScreen} />
     <HomeStack.Screen name="SessionSummary" component={SessionSummaryScreen} />
-    <HomeStack.Screen name="VideoAnalysis" component={VideoAnalysisScreen} />
+    {/* VideoAnalysis hidden — feature deprioritised, see report future work.
+        Uncomment to restore the Home screen's "Analyze a Video" entry point. */}
+    {/* <HomeStack.Screen name="VideoAnalysis" component={VideoAnalysisScreen} /> */}
   </HomeStack.Navigator>
 );
 
@@ -71,6 +73,8 @@ const SettingsNavigator = () => (
   </SettingsStack.Navigator>
 );
 
+// Video tab hidden — feature deprioritised, see report future work.
+// VideoNavigator/VideoStack kept for easy restoration — see MainNavigator below.
 const VideoNavigator = () => (
   <VideoStack.Navigator screenOptions={{ headerShown: false }}>
     <VideoStack.Screen name="VideoAnalysis" component={VideoAnalysisScreen} />
@@ -136,7 +140,8 @@ const MainNavigator = () => {
         tabBarIcon: ({ color }) => {
           if (route.name === 'HomeTab') return <HomeIcon color={color} />;
           if (route.name === 'AnalyticsTab') return <AnalyticsIcon color={color} />;
-          if (route.name === 'VideoTab') return <VideoIcon color={color} />;
+          // VideoTab icon routing hidden — feature deprioritised, see report future work.
+          // if (route.name === 'VideoTab') return <VideoIcon color={color} />;
           if (route.name === 'CoachTab') return <CoachIcon color={color} />;
           return <SettingsIcon color={color} />;
         },
@@ -144,7 +149,10 @@ const MainNavigator = () => {
     >
       <Tab.Screen name="HomeTab" component={HomeNavigator} options={{ tabBarLabel: 'Home' }} />
       <Tab.Screen name="AnalyticsTab" component={AnalyticsNavigator} options={{ tabBarLabel: 'Progress' }} />
-      <Tab.Screen name="VideoTab" component={VideoNavigator} options={{ tabBarLabel: 'Video' }} />
+      {/* Video tab hidden — feature deprioritised, see report future work.
+          VideoAnalysisScreen, VideoNavigator, and VideoStack remain intact above —
+          uncomment this line (and the icon routing above) to restore the tab. */}
+      {/* <Tab.Screen name="VideoTab" component={VideoNavigator} options={{ tabBarLabel: 'Video' }} /> */}
       <Tab.Screen name="CoachTab" component={CoachNavigator} options={{ tabBarLabel: 'AI Coach' }} />
       <Tab.Screen name="SettingsTab" component={SettingsNavigator} options={{ tabBarLabel: 'Settings' }} />
     </Tab.Navigator>

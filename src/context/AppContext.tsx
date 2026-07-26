@@ -5,6 +5,7 @@ import { subscribeToAuthState, logout } from '../services/firebaseAuth';
 import { loadProfile, saveProfile, patchProfile } from '../services/firebaseProfile';
 import { saveSession, loadSessions } from '../services/firebaseWorkout';
 import { todayMYTDateStr } from '../utils/mytDate';
+import { computeStreak } from '../utils/streak';
 
 export type Gender = 'male' | 'female' | 'other';
 export type FitnessGoal = 'lose_weight' | 'build_muscle' | 'improve_endurance' | 'flexibility';
@@ -118,11 +119,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const addWorkoutSession = useCallback((session: WorkoutSession) => {
     setWorkoutHistory((prev) => [session, ...prev]);
-    setProfileState((prev) =>
-      prev ? { ...prev, totalWorkouts: prev.totalWorkouts + 1, totalReps: prev.totalReps + session.reps } : null
-    );
     saveSession(session); // reads auth.currentUser internally
   }, []);
+
+  // Streak/totalWorkouts/totalReps are derived from actual session history rather than
+  // incremented/decremented imperatively, so they're always correct on load and never
+  // silently go stale or desync from what's actually in workoutHistory.
+  useEffect(() => {
+    if (!profile) return;
+    const streak = computeStreak(workoutHistory);
+    const totalWorkouts = workoutHistory.length;
+    const totalReps = workoutHistory.reduce((sum, s) => sum + s.reps, 0);
+    if (streak !== profile.streak || totalWorkouts !== profile.totalWorkouts || totalReps !== profile.totalReps) {
+      updateProfile({ streak, totalWorkouts, totalReps });
+    }
+  }, [workoutHistory, profile, updateProfile]);
 
   const signOutUser = useCallback(async () => {
     await logout();

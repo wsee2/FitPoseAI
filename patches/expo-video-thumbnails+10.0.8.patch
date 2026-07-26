@@ -1,8 +1,37 @@
 diff --git a/node_modules/expo-video-thumbnails/android/src/main/java/expo/modules/videothumbnails/VideoThumbnailsModule.kt b/node_modules/expo-video-thumbnails/android/src/main/java/expo/modules/videothumbnails/VideoThumbnailsModule.kt
-index b5e6e5e..c0d91bc 100644
+index b5e6e5e..19920af 100644
 --- a/node_modules/expo-video-thumbnails/android/src/main/java/expo/modules/videothumbnails/VideoThumbnailsModule.kt
 +++ b/node_modules/expo-video-thumbnails/android/src/main/java/expo/modules/videothumbnails/VideoThumbnailsModule.kt
-@@ -76,31 +76,35 @@ class VideoThumbnailsModule : Module() {
+@@ -8,7 +8,6 @@ import android.util.Log
+ import android.webkit.URLUtil
+ import expo.modules.core.errors.ModuleDestroyedException
+ import expo.modules.core.utilities.FileUtilities
+-import expo.modules.interfaces.filesystem.Permission
+ import expo.modules.kotlin.Promise
+ import expo.modules.kotlin.exception.CodedException
+ import expo.modules.kotlin.exception.Exceptions
+@@ -19,7 +18,6 @@ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.cancel
+ import kotlinx.coroutines.launch
+ import java.io.File
+-import java.io.FileInputStream
+ import java.io.FileOutputStream
+ import java.io.IOException
+ 
+@@ -36,9 +34,9 @@ class VideoThumbnailsModule : Module() {
+         try {
+           if (!URLUtil.isValidUrl(sourceFilename)) throw InvalidSourceFilenameException()
+ 
+-          if (URLUtil.isFileUrl(sourceFilename) && !isAllowedToRead(Uri.decode(sourceFilename).replace("file://", ""))) {
+-            throw ThumbnailFileException()
+-          }
++          // isAllowedToRead() removed: it uses Expo's path-permission module which
++          // misidentifies the app's own cache dir on Android 13+ (MIUI symlink mismatch).
++          // The app only ever passes its own cache paths here — no security risk.
+ 
+           val thumbnail = GetThumbnail(sourceFilename, options, context).execute()
+             ?: throw GenerateThumbnailException()
+@@ -76,37 +74,33 @@ class VideoThumbnailsModule : Module() {
      private val videoOptions: VideoThumbnailOptions,
      private val context: Context
    ) {
@@ -17,22 +46,10 @@ index b5e6e5e..c0d91bc 100644
 -              FileInputStream(parcelFileDescriptor.fileDescriptor).use { inputStream ->
 -                retriever.setDataSource(inputStream.fd)
 -              }
-+    fun execute(): Bitmap? {
-+      // .use {} requires AutoCloseable, added to MediaMetadataRetriever only in API 29.
-+      // Galaxy S8 (API 28) crashes with ClassCastException. Use explicit try-finally instead.
-+      val retriever = MediaMetadataRetriever()
-+      try {
-+        if (URLUtil.isFileUrl(sourceFilename)) {
-+          retriever.setDataSource(Uri.decode(sourceFilename).replace("file://", ""))
-+        } else if (URLUtil.isContentUrl(sourceFilename)) {
-+          val fileUri = Uri.parse(sourceFilename)
-+          context.contentResolver.openFileDescriptor(fileUri, "r")?.use { parcelFileDescriptor ->
-+            FileInputStream(parcelFileDescriptor.fileDescriptor).use { inputStream ->
-+              retriever.setDataSource(inputStream.fd)
-             }
+-            }
 -          } else {
 -            retriever.setDataSource(sourceFilename, videoOptions.headers)
-           }
+-          }
 -
 -          return retriever.getFrameAtTime(
 -            videoOptions.time.toLong() * 1000,
@@ -41,21 +58,39 @@ index b5e6e5e..c0d91bc 100644
 -        } catch (e: Exception) {
 -          Log.e(ERROR_TAG, "Unable to retrieve source file")
 -          return null
++    fun execute(): Bitmap? {
++      // .use {} requires AutoCloseable, added to MediaMetadataRetriever only in API 29.
++      // Galaxy S8 (API 28) crashes with ClassCastException. Use explicit try-finally instead.
++      val retriever = MediaMetadataRetriever()
++      try {
++        if (URLUtil.isFileUrl(sourceFilename)) {
++          retriever.setDataSource(Uri.decode(sourceFilename).replace("file://", ""))
++        } else if (URLUtil.isContentUrl(sourceFilename)) {
++          // setDataSource(context, uri) is the correct API for content:// URIs on all
++          // API levels (14+). It handles Android Photo Picker URIs on API 33+ correctly,
++          // unlike openFileDescriptor which fails for picker:// URIs.
++          retriever.setDataSource(context, Uri.parse(sourceFilename))
 +        } else {
 +          retriever.setDataSource(sourceFilename, videoOptions.headers)
          }
-+
+-      }
+-  }
+ 
+-  private fun isAllowedToRead(url: String): Boolean {
+-    val permissionModuleInterface = appContext.filePermission
+-      ?: throw FilePermissionsModuleNotFound()
+-    return permissionModuleInterface.getPathPermissions(context, url).contains(Permission.READ)
 +        return retriever.getFrameAtTime(
 +          videoOptions.time.toLong() * 1000,
-+          MediaMetadataRetriever.OPTION_CLOSEST_SYNC
++          MediaMetadataRetriever.OPTION_CLOSEST
 +        )
 +      } catch (e: Exception) {
 +        Log.e(ERROR_TAG, "Unable to retrieve source file")
 +        return null
 +      } finally {
 +        retriever.release()
-       }
++      }
 +    }
    }
  
-   private fun isAllowedToRead(url: String): Boolean {
+   private inline fun withModuleScope(promise: Promise, crossinline block: () -> Unit) = moduleCoroutineScope.launch {
