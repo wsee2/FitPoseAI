@@ -63,6 +63,13 @@ export class SquatFsm {
     this.lastState = INITIAL_SQUAT_STATE;
   }
 
+  /** Clears transient per-frame state (stage, smoothing buffer) but keeps counter/score. */
+  pauseForChat(): void {
+    this.stage = null;
+    this.squatFormGood = false;
+    this.smoothBuffer = [];
+  }
+
   /** Feed one frame of MoveNet keypoints (flattened length-51 array). */
   update(keypoints: number[]): SquatFsmState {
     const shoulderL = getKeypoint(keypoints, LEFT_SHOULDER);

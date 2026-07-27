@@ -70,6 +70,14 @@ export class PushupFsm {
     this.lastState = INITIAL_PUSHUP_STATE;
   }
 
+  /** Clears transient per-frame state (stage, smoothing buffers) but keeps counter/score. */
+  pauseForChat(): void {
+    this.stage = null;
+    this.pushupFormGood = false;
+    this.elbowSmoothBuffer = [];
+    this.bodySmoothBuffer = [];
+  }
+
   /** Feed one frame of MoveNet keypoints (flattened length-51 array). */
   update(keypoints: number[]): PushupFsmState {
     const shoulderL = getKeypoint(keypoints, LEFT_SHOULDER);

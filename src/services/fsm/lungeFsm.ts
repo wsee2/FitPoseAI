@@ -63,6 +63,13 @@ export class LungeFsm {
     this.lastState = INITIAL_LUNGE_STATE;
   }
 
+  /** Clears transient per-frame state (stage, smoothing buffer) but keeps counter/score. */
+  pauseForChat(): void {
+    this.stage = null;
+    this.lungeFormGood = false;
+    this.smoothBuffer = [];
+  }
+
   /** Feed one frame of MoveNet keypoints (flattened length-51 array). */
   update(keypoints: number[]): LungeFsmState {
     const shoulderL = getKeypoint(keypoints, LEFT_SHOULDER);

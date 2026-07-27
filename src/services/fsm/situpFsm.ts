@@ -66,6 +66,13 @@ export class SitupFsm {
     this.lastState = INITIAL_SITUP_STATE;
   }
 
+  /** Clears transient per-frame state (stage, smoothing buffers) but keeps counter/score. */
+  pauseForChat(): void {
+    this.stage = null;
+    this.leanSmoothBuffer = [];
+    this.trunkSmoothBuffer = [];
+  }
+
   /** Feed one frame of MoveNet keypoints (flattened length-51 array). */
   update(keypoints: number[]): SitupFsmState {
     const shoulderL = getKeypoint(keypoints, LEFT_SHOULDER);

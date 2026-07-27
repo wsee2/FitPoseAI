@@ -65,6 +65,20 @@ export class PlankFsm {
     this.lastState = INITIAL_PLANK_STATE;
   }
 
+  /**
+   * Finalizes any in-progress hold into plankHoldTime and stops the running wall-clock
+   * timer, so the paused duration (chatting) is never added to the held time on resume.
+   * Keeps plankHoldTime and clears only transient per-frame state.
+   */
+  pauseForChat(): void {
+    if (this.plankStartTime !== null) {
+      this.plankHoldTime += Date.now() / 1000 - this.plankStartTime;
+      this.plankStartTime = null;
+    }
+    this.plankBadFrames = 0;
+    this.bodySmoothBuffer = [];
+  }
+
   /** Feed one frame of MoveNet keypoints (flattened length-51 array). */
   update(keypoints: number[]): PlankFsmState {
     const shoulderL = getKeypoint(keypoints, LEFT_SHOULDER);

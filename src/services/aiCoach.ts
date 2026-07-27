@@ -54,6 +54,20 @@ export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: s
 export interface ChatSession { history: ChatMessage[] }
 
 // ---------------------------------------------------------------------------
+// Current in-progress session — injected as extra context when the user chats mid-workout
+// (via the WorkoutScreen tap-to-chat overlay). Never written to Firebase; exists only for
+// the duration of the chat prompt, so today's not-yet-saved reps are still visible to the coach.
+export interface CurrentSessionContext {
+  exerciseName: string;
+  progressLabel: string; // e.g. "6 reps so far" or "1:12 held so far"
+  date: string; // today, Malaysia time (YYYY-MM-DD) — matches the format used in history summaries
+}
+
+function buildCurrentSessionNote(current: CurrentSessionContext): string {
+  return `CURRENT SESSION IN PROGRESS RIGHT NOW (${current.date}) — NOT YET SAVED to the history above, the user paused mid-workout to chat with you. Exercise: ${current.exerciseName}. Progress so far: ${current.progressLabel}. If the user asks about "just now", "this session", or how they're doing right now, this is what they mean — treat it as separate from, and in addition to, the saved history above.`;
+}
+
+// ---------------------------------------------------------------------------
 // Provider abstraction — swap ONLY this function (+ MODEL_NAME + OPENAI_API_KEY) to change provider.
 async function callLLM(messages: ChatMessage[]): Promise<string> {
   const res = await fetch(`${OPENAI_API_BASE}/chat/completions`, {
@@ -118,15 +132,33 @@ function buildHistorySummary(sessions: WorkoutSession[]): string {
  * Create a chat session seeded with the user's workout history.
  * Call once per AICoachScreen mount. Returns null if API key is missing.
  */
-export function createChatSession(recentSessions: WorkoutSession[]): ChatSession | null {
+export function createChatSession(
+  recentSessions: WorkoutSession[],
+  currentSession?: CurrentSessionContext | null
+): ChatSession | null {
   if (!OPENAI_API_KEY) return null;
   const historySummary = buildHistorySummary(recentSessions);
-  return {
-    history: [
-      { role: 'system', content: COACH_SYSTEM_PROMPT },
-      { role: 'system', content: `USER'S RECENT WORKOUT HISTORY:\n${historySummary}` },
-    ],
-  };
+  const history: ChatMessage[] = [
+    { role: 'system', content: COACH_SYSTEM_PROMPT },
+    { role: 'system', content: `USER'S RECENT WORKOUT HISTORY:\n${historySummary}` },
+  ];
+  if (currentSession) {
+    history.push({ role: 'system', content: buildCurrentSessionNote(currentSession) });
+  }
+  return { history };
+}
+
+/**
+ * Refreshes the coach's awareness of the current in-progress session on an existing chat
+ * (e.g. the user closed the mid-workout chat, did more reps, then re-opened it). Appends a
+ * fresh system note rather than recreating the session, so prior chat turns are preserved.
+ */
+export function updateCurrentSessionContext(
+  chat: ChatSession | null,
+  currentSession: CurrentSessionContext | null
+): void {
+  if (!chat || !currentSession) return;
+  chat.history.push({ role: 'system', content: buildCurrentSessionNote(currentSession) });
 }
 
 /** Send one chat message and return the coach reply. Always returns a string (never throws). */

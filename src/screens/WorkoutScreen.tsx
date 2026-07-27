@@ -35,6 +35,7 @@ import { INITIAL_PLANK_STATE, PlankFsm, type PlankFsmState } from '../services/f
 import { INITIAL_SITUP_STATE, SitupFsm, type SitupFsmState } from '../services/fsm/situpFsm';
 import SkeletonOverlay, { CONF_THRESHOLD, STATUS_COLORS, type SkeletonStatus } from '../components/SkeletonOverlay';
 import CoachAvatarCircle from '../components/CoachAvatarCircle';
+import WorkoutChatOverlay from '../components/WorkoutChatOverlay';
 
 /** Pulls the exercise-specific (reps, score) pair out of whichever FSM is active. */
 function getFinalStats(
@@ -279,6 +280,11 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const sessionStartRef = useRef(Date.now());
   const hasSavedRef = useRef(false);
 
+  // Tap-to-chat overlay — pauses the camera/inference/FSM pipeline while open.
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const isChatOpenRef = useRef(false);
+  isChatOpenRef.current = isChatOpen;
+
   // ---------------------------------------------------------------------------
   // Calibration phase state.
   // phaseRef is kept in sync with phase state on every render so that the stable
@@ -502,6 +508,39 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     };
   }, []);
 
+  const handleOpenChat = useCallback(() => {
+    // Cancel an in-progress pre-workout countdown rather than trying to resume it later —
+    // no reps have been counted yet at this point, so dropping back to calibration is lossless.
+    if (phaseRef.current === 'countdown') {
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+      phaseRef.current = 'calibrating';
+      setPhase('calibrating');
+      stableFramesRef.current = 0;
+      badFramesRef.current = 0;
+      calibGuidanceRef.current = 'Step into the frame';
+      setCalibGuidance('Step into the frame');
+    }
+
+    // Finalize/clear each FSM's transient per-frame state (smoothing buffers, in-progress
+    // stage, plank's running wall-clock timer) while preserving the accumulated counter/score.
+    switch (exerciseId) {
+      case 'squat':  squatFsmRef.current.pauseForChat();  break;
+      case 'pushup': pushupFsmRef.current.pauseForChat(); break;
+      case 'lunge':  lungeFsmRef.current.pauseForChat();  break;
+      case 'plank':  plankFsmRef.current.pauseForChat();  break;
+      case 'situp':  situpFsmRef.current.pauseForChat();  break;
+    }
+
+    setIsChatOpen(true);
+  }, [exerciseId]);
+
+  const handleCloseChat = useCallback(() => {
+    setIsChatOpen(false);
+  }, []);
+
   useEffect(() => {
     requestPermission();
   }, [requestPermission]);
@@ -525,6 +564,10 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   // for phase changes — only exerciseId changes recreate it.
   const updateKeypoints = useRunOnJS(
     (kp: number[], inferMs: number, resizeMsArg: number, orientationDeg: number, totalFrames: number) => {
+      // Pipeline paused while the chat overlay is open. Guards the in-flight-frame race where a
+      // frame processor call started just before isChatOpen flipped could still land here.
+      if (isChatOpenRef.current) return;
+
       setKeypoints(kp);
       setInferenceMs(inferMs);
       setResizeMs(resizeMsArg);
@@ -908,7 +951,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       <Camera
         style={StyleSheet.absoluteFill}
         device={device}
-        isActive={true}
+        isActive={!isChatOpen}
         frameProcessor={frameProcessor}
         onOutputOrientationChanged={(orientation) => {
           switch (orientation) {
@@ -1053,8 +1096,9 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       {/* Circular coach avatar — top-right, below the Finish button.
           zIndex 1001 renders above the status border ring (zIndex 1000).
           Tune WORKOUT_ROBOT_SIZE / WORKOUT_ROBOT_RIGHT / WORKOUT_ROBOT_TOP_OFFSET above. */}
-      <View
-        pointerEvents="none"
+      <TouchableOpacity
+        activeOpacity={0.8}
+        onPress={handleOpenChat}
         style={{
           position: 'absolute',
           right: WORKOUT_ROBOT_RIGHT,
@@ -1063,7 +1107,18 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         }}
       >
         <CoachAvatarCircle size={WORKOUT_ROBOT_SIZE} expression={coachExpression} />
-      </View>
+      </TouchableOpacity>
+
+      <WorkoutChatOverlay
+        visible={isChatOpen}
+        onClose={handleCloseChat}
+        exerciseName={EXERCISES[exerciseId].name}
+        currentProgressLabel={
+          exerciseId === 'plank'
+            ? `${formatDuration(finalStatsRef.current.reps)} held so far`
+            : `${finalStatsRef.current.reps} rep${finalStatsRef.current.reps === 1 ? '' : 's'} so far`
+        }
+      />
     </View>
   );
 }
