@@ -63,7 +63,14 @@ function getFinalStats(
 }
 
 const INFER_EVERY_N_FRAMES = 1;
-const SMOOTHING_MS = 50;
+// Duration of the linear ease from the last displayed keypoints to the newly detected ones
+// (skeleton overlay only — FSMs consume raw, unsmoothed keypoints, see updateKeypoints below).
+// New detections land every ~38-50ms at the device's typical 20-26 FPS. If this value is close
+// to or larger than that interval, each tween gets re-targeted before finishing, so the overlay
+// perpetually trails the real position. Keep it comfortably below the inter-frame interval.
+// Raise it (e.g. toward 30-40) if the skeleton looks jittery; lower it (e.g. toward 8-12) if it
+// still looks laggy.
+const SMOOTHING_MS = 16;
 
 const ROBOT_DEBOUNCE_MS = 800;
 const ROBOT_HAPPY_DURATION_MS = 1500;
