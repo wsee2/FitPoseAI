@@ -1,8 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Animated, Keyboard, KeyboardAvoidingView, Modal, Platform,
+  Animated, BackHandler,
   Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
+import Reanimated, {
+  useAnimatedKeyboard, useAnimatedStyle, useSharedValue, withTiming,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors, BorderRadius } from '../theme';
 import { useApp } from '../context/AppContext';
@@ -40,18 +43,45 @@ export default function WorkoutChatOverlay({ visible, onClose, exerciseName, cur
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
   const typingDot1 = useRef(new Animated.Value(0)).current;
   const typingDot2 = useRef(new Animated.Value(0)).current;
   const typingDot3 = useRef(new Animated.Value(0)).current;
 
+  // Native-driven keyboard height, correctly accounts for edge-to-edge display mode
+  // (this app's android.edgeToEdgeEnabled: true).
+  const keyboard = useAnimatedKeyboard();
+  const sheetAnimatedStyle = useAnimatedStyle(() => {
+    'worklet';
+    return {
+      paddingBottom: keyboard.height.value > 0 ? keyboard.height.value : insets.bottom,
+    };
+  });
+
+  // Show/hide animation (replaces the transparent-Modal slide). Backdrop fades in; sheet
+  // slides up from below the screen. Component stays mounted at all times (see comment
+  // above) — pointerEvents is what actually gates interaction when hidden.
+  const backdropOpacity = useSharedValue(0);
+  const sheetTranslateY = useSharedValue(400);
   useEffect(() => {
-    if (Platform.OS !== 'android') return;
-    const show = Keyboard.addListener('keyboardDidShow', (e) => setKeyboardHeight(e.endCoordinates.height));
-    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboardHeight(0));
-    return () => { show.remove(); hide.remove(); };
-  }, []);
+    backdropOpacity.value = withTiming(visible ? 1 : 0, { duration: 220 });
+    sheetTranslateY.value = withTiming(visible ? 0 : 400, { duration: 250 });
+  }, [visible, backdropOpacity, sheetTranslateY]);
+  const backdropAnimatedStyle = useAnimatedStyle(() => ({ opacity: backdropOpacity.value }));
+  const slideAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: sheetTranslateY.value }],
+  }));
+
+  // Android hardware/gesture back button — Modal used to handle this via onRequestClose;
+  // now that this is a plain in-tree overlay, it must be wired up explicitly.
+  useEffect(() => {
+    if (!visible) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      onClose();
+      return true;
+    });
+    return () => sub.remove();
+  }, [visible, onClose]);
 
   // On first open, seed the chat session (reused for every subsequent open/close so history
   // persists). On every re-open after that, refresh the coach's awareness of the current
@@ -110,20 +140,13 @@ export default function WorkoutChatOverlay({ visible, onClose, exerciseName, cur
   const formatTime = (d: Date) => d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.backdrop}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.sheetWrapper}
-          pointerEvents="box-none"
-        >
-          <View
-            style={[
-              styles.sheet,
-              Platform.OS === 'android' && keyboardHeight > 0 ? { paddingBottom: keyboardHeight } : { paddingBottom: insets.bottom },
-            ]}
-          >
+    <Reanimated.View
+      style={[styles.backdrop, backdropAnimatedStyle]}
+      pointerEvents={visible ? 'auto' : 'none'}
+    >
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+      <View style={styles.sheetWrapper} pointerEvents="box-none">
+        <Reanimated.View style={[styles.sheet, sheetAnimatedStyle, slideAnimatedStyle]}>
             <View style={styles.grabber} />
 
             <View style={styles.header}>
@@ -195,15 +218,22 @@ export default function WorkoutChatOverlay({ visible, onClose, exerciseName, cur
                 <Text style={[styles.sendIcon, input.trim() && !isTyping ? styles.sendIconActive : styles.sendIconDisabled]}>▶</Text>
               </TouchableOpacity>
             </View>
-          </View>
-        </KeyboardAvoidingView>
+        </Reanimated.View>
       </View>
-    </Modal>
+    </Reanimated.View>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
+  // Absolutely positioned in-tree overlay (not a native Modal — see comment above the
+  // BackHandler effect) so it participates in the same window/keyboard resize behavior as
+  // the rest of WorkoutScreen. zIndex keeps it above the coach-robot button (zIndex 1001).
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-end',
+    zIndex: 2000,
+  },
   sheetWrapper: { maxHeight: '82%' },
   sheet: {
     backgroundColor: Colors.background,

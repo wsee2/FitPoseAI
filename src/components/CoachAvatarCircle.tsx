@@ -155,6 +155,10 @@ export default function CoachAvatarCircle({ size, expression }: Props) {
                 backgroundColor: 'transparent',
               }}
               onError={(e: RNRiveError) => {
+                // Expected on every mount: the avatar is driven by the state machine input,
+                // not a ViewModel, so "no default ViewModel found" is harmless. Same handling
+                // as CoachRobot.tsx.
+                if (e.type === RNRiveErrorType.DataBindingError) return;
                 // Only fall back to static SVG when the file itself is unreadable.
                 // Other errors (wrong state machine name, unused assets, bad inputs)
                 // are non-fatal — the animation still plays; just log them.

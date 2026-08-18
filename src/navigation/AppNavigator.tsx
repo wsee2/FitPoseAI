@@ -16,6 +16,7 @@ import {
   VideoStackParamList,
 } from './types';
 import { Colors } from '../theme';
+import { getDefaultTabBarStyle } from './tabBarStyle';
 
 import SplashScreen from '../screens/SplashScreen';
 import OnboardingScreen from '../screens/OnboardingScreen';
@@ -122,17 +123,17 @@ const SettingsIcon = ({ color }: { color: string }) => (
 
 const MainNavigator = () => {
   const insets = useSafeAreaInsets();
-  const tabBarHeight = 60 + insets.bottom;
 
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarStyle: {
-          ...styles.tabBar,
-          height: tabBarHeight,
-          paddingBottom: insets.bottom,
-        },
+        // The tab bar is `position: 'absolute'` and pinned to the screen bottom regardless
+        // of keyboard state (see styles.tabBar below). Without this, it stays mounted there
+        // while the keyboard is open, sitting on top of whatever the active screen tries to
+        // render in that space (e.g. AICoachScreen's input bar) and swallowing its touches.
+        tabBarHideOnKeyboard: true,
+        tabBarStyle: getDefaultTabBarStyle(insets.bottom),
         tabBarActiveTintColor: Colors.cyan,
         tabBarInactiveTintColor: Colors.textMuted,
         tabBarShowLabel: true,
@@ -173,14 +174,6 @@ export const AppNavigator = () => (
 );
 
 const styles = StyleSheet.create({
-  tabBar: {
-    position: 'absolute',
-    borderTopWidth: 1,
-    borderTopColor: Colors.border,
-    backgroundColor: Colors.card,
-    elevation: 8,
-    height: 60,
-  },
   tabLabel: {
     fontSize: 10,
     fontWeight: '600',

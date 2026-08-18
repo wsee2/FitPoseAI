@@ -3,12 +3,13 @@ import { Animated, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View
 import {
   Camera,
   useCameraDevice,
+  useCameraFormat,
   useCameraPermission,
   useFrameProcessor,
 } from 'react-native-vision-camera';
 import type { Frame } from 'react-native-vision-camera';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { RouteProp } from '@react-navigation/native';
+import { RouteProp, useFocusEffect } from '@react-navigation/native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NitroModules } from 'react-native-nitro-modules';
@@ -21,6 +22,7 @@ import {
 import { useResizePlugin } from 'vision-camera-resize-plugin';
 import type { TensorflowModel } from 'react-native-fast-tflite';
 import type { HomeStackParamList } from '../navigation/types';
+import { getDefaultTabBarStyle } from '../navigation/tabBarStyle';
 import { loadMoveNetModel } from '../services/moveNet';
 import { useApp } from '../context/AppContext';
 import { getSessionEndMessage } from '../services/aiCoach';
@@ -140,6 +142,72 @@ function applyOverlayTransform(kp: number[], t: OverlayTransform): number[] {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// STAGE 1 — undo resize()'s automatic center-crop-to-square (DISPLAY ONLY).
+// The resize() call below passes `scale: {width:192,height:192}` with no explicit `crop`.
+// Per vision-camera-resize-plugin's own docs (and its native ResizePlugin.kt source, verified
+// directly): "If [crop is] not set, a center-crop to the given target aspect ratio is
+// automatically calculated" — here, a 1:1 SQUARE, computed by trimming the frame's LARGER
+// dimension down to match its smaller one, centered. So MoveNet's raw normalized (x,y) are
+// relative to a square, center-cropped sub-region of the upright frame — NOT the full frame.
+// This recovers each keypoint's true position as a fraction of the FULL upright frame
+// (rotatedFrameW x rotatedFrameH), which the STAGE 2 cover-crop correction below depends on.
+// Angle math (the FSMs, via fsmKp) deliberately does NOT use this — see the note below.
+function undoModelSquareCrop(kp: number[], rotatedFrameW: number, rotatedFrameH: number): number[] {
+  if (!(rotatedFrameW > 0) || !(rotatedFrameH > 0)) return kp; // dimensions not ready yet
+  const side = Math.min(rotatedFrameW, rotatedFrameH);
+  const cropXFrac = (rotatedFrameW - side) / 2 / rotatedFrameW; // 0 unless frame is wider than tall
+  const cropYFrac = (rotatedFrameH - side) / 2 / rotatedFrameH; // 0 unless frame is taller than wide
+  const scaleXFrac = side / rotatedFrameW;
+  const scaleYFrac = side / rotatedFrameH;
+  const d = kp.slice();
+  for (let i = 0; i < 17; i++) {
+    d[i * 3] = cropYFrac + kp[i * 3]! * scaleYFrac;
+    d[i * 3 + 1] = cropXFrac + kp[i * 3 + 1]! * scaleXFrac;
+  }
+  return d;
+}
+
+// STAGE 2 — "cover" crop correction (DISPLAY ONLY — feeds SkeletonOverlay via displayKp).
+// <Camera> never sets `resizeMode`, so it uses VisionCamera's default "cover", which crops
+// the (full, STAGE-1-recovered) frame to fill the screen whenever their aspect ratios differ.
+// Without this the skeleton is drawn as if the entire frame were visible edge-to-edge —
+// producing a systematic offset/scale mismatch against the actually-visible (cropped)
+// preview. Must run on STAGE 1's output (fraction of the FULL frame), and after the existing
+// landscape rotation transform above, since that transform swaps which axis is "width" vs
+// "height" for displayKp — contentAspect is computed to match.
+function applyCoverCropCorrection(kp: number[], contentAspect: number, screenAspect: number): number[] {
+  if (!(contentAspect > 0) || !(screenAspect > 0)) return kp; // dimensions not ready yet
+  const d = kp.slice();
+  if (contentAspect > screenAspect) {
+    // Content proportionally wider than the screen -> left/right edges are cropped off.
+    const visibleFrac = screenAspect / contentAspect;
+    const xMin = (1 - visibleFrac) / 2;
+    for (let i = 0; i < 17; i++) {
+      d[i * 3 + 1] = (kp[i * 3 + 1]! - xMin) / visibleFrac;
+    }
+  } else if (contentAspect < screenAspect) {
+    // Content proportionally taller/narrower than the screen -> top/bottom are cropped off.
+    const visibleFrac = contentAspect / screenAspect;
+    const yMin = (1 - visibleFrac) / 2;
+    for (let i = 0; i < 17; i++) {
+      d[i * 3] = (kp[i * 3]! - yMin) / visibleFrac;
+    }
+  }
+  return d;
+}
+
+// NOTE on FSM angle math (fsmKp, below): deliberately NOT run through either stage above.
+// resize()'s square crop is crop-then-UNIFORM-scale (same scale factor S on both axes, just
+// offset differently per axis — confirmed against the native source), not an independent
+// per-axis stretch. A uniform scale plus a per-axis offset does not change the ratio between
+// any two points' dx and dy, so raw model-output angles (via calculateAngle/spineLeanAngle in
+// poseMath.ts) are ALREADY geometrically correct with no correction needed. (An earlier
+// version of this code incorrectly assumed a non-uniform stretch and "corrected" fsmKp for
+// it — that was based on a wrong premise and has been removed; it was quietly introducing
+// distortion into rep-counting that wasn't there before.)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Calibration phase
 type WorkoutPhase = 'calibrating' | 'countdown' | 'active';
 
@@ -240,8 +308,34 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const { exerciseId } = route.params;
   const { width: previewWidth, height: previewHeight } = useWindowDimensions();
   const isLandscape = previewWidth > previewHeight;
+  // Mirrors previewWidth/previewHeight every render so the stable updateKeypoints closure
+  // (see useRunOnJS below, deps=[exerciseId] only) can read the current screen size for the
+  // Part A cover-crop correction without going stale after a device rotation — same pattern
+  // as phaseRef below.
+  const previewWidthRef = useRef(previewWidth);
+  const previewHeightRef = useRef(previewHeight);
+  previewWidthRef.current = previewWidth;
+  previewHeightRef.current = previewHeight;
   const insets = useSafeAreaInsets();
   const tabBarHeight = useBottomTabBarHeight();
+
+  // Hide the bottom tab bar for the entire time this screen is focused. It's `position:
+  // absolute` with Android `elevation` (AppNavigator.tsx), which — unlike the in-tree
+  // overlays here (SkeletonOverlay, WorkoutChatOverlay) — isn't ordered by this screen's own
+  // zIndex, so it can render on top of them. Previously this went unnoticed because
+  // WorkoutChatOverlay used a native <Modal>, which always draws above the tab bar
+  // regardless; now that it's an in-tree view, the tab bar must be hidden explicitly.
+  // Restoring with `undefined` does NOT fall back to AppNavigator's function-based
+  // screenOptions default — it falls back to the library's bare default (white background) —
+  // so the exact style must be reconstructed via the shared getDefaultTabBarStyle helper.
+  useFocusEffect(
+    useCallback(() => {
+      const parent = navigation.getParent();
+      parent?.setOptions({ tabBarStyle: { display: 'none' } });
+      return () => parent?.setOptions({ tabBarStyle: getDefaultTabBarStyle(insets.bottom) });
+    }, [navigation, insets.bottom])
+  );
+
   const { hasPermission, requestPermission } = useCameraPermission();
   const { addWorkoutSession, workoutHistory, setLastCoachMessage } = useApp();
   const frontDevice = useCameraDevice('front');
@@ -256,6 +350,18 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const lastGoodDeviceRef = useRef(liveDevice);
   if (liveDevice) lastGoodDeviceRef.current = liveDevice;
   const device = liveDevice ?? lastGoodDeviceRef.current;
+
+  // Constrain BOTH the preview and the frame-processor stream to a format whose aspect ratio
+  // is as close to the screen's as possible — VisionCamera's own documented pattern for this
+  // (FormatFilter.videoAspectRatio: "target aspect ratio of the video (and preview) output").
+  // Without this, VisionCamera can provision the preview and the frame processor's analysis
+  // stream at different resolutions/aspect ratios (frame processing commonly targets a lower,
+  // performance-oriented resolution independent of preview), so frame.width/frame.height
+  // (consumed by the PART A/B corrections below) wouldn't reliably represent what's actually
+  // shown on screen — and it also shrinks the crop mismatch PART A has to correct for.
+  const format = useCameraFormat(device, [
+    { videoAspectRatio: previewHeight / previewWidth },
+  ]);
 
   const [model, setModel] = useState<TensorflowModel | null>(null);
   const [keypoints, setKeypoints] = useState<number[]>([]);
@@ -321,6 +427,8 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const perfResizeMsRef  = useRef<number[]>([]);  // per-inference resize latency (ms)
   const lastPerfUpdateRef = useRef(0);             // last timestamp we called setPerfHud
   const lastPerfLogRef    = useRef(0);             // last timestamp we logged [PERF]
+  // TEMP — diagnosing the skeleton-alignment aspect-ratio math. Remove once confirmed fixed.
+  const lastAlignLogRef   = useRef(0);             // last timestamp we logged [ALIGN]
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Scale animation for the countdown digit.
@@ -570,7 +678,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   // Reads phaseRef.current (stable ref object) so this closure never needs re-creation
   // for phase changes — only exerciseId changes recreate it.
   const updateKeypoints = useRunOnJS(
-    (kp: number[], inferMs: number, resizeMsArg: number, orientationDeg: number, totalFrames: number) => {
+    (kp: number[], inferMs: number, resizeMsArg: number, orientationDeg: number, totalFrames: number, rotatedFrameW: number, rotatedFrameH: number) => {
       // Pipeline paused while the chat overlay is open. Guards the in-flight-frame race where a
       // frame processor call started just before isChatOpen flipped could still land here.
       if (isChatOpenRef.current) return;
@@ -640,14 +748,19 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       }
       // ───────────────────────────────────────────────────────────────────────
 
+      // STAGE 1 — recover each keypoint's position relative to the FULL upright frame,
+      // undoing resize()'s automatic center-crop-to-square (see undoModelSquareCrop above).
+      // Display-only: fsmKp (below) deliberately continues from the raw, un-cropped-back kp.
+      const kpFullFrame = undoModelSquareCrop(kp, rotatedFrameW, rotatedFrameH);
+
       // (a) Display copy — overlay transform, portrait = identity.
       let displayKp: number[];
       if (orientationDeg === 90) {
-        displayKp = applyOverlayTransform(kp, LANDSCAPE_LEFT_TRANSFORM);
+        displayKp = applyOverlayTransform(kpFullFrame, LANDSCAPE_LEFT_TRANSFORM);
       } else if (orientationDeg === 270) {
-        displayKp = applyOverlayTransform(kp, LANDSCAPE_RIGHT_TRANSFORM);
+        displayKp = applyOverlayTransform(kpFullFrame, LANDSCAPE_RIGHT_TRANSFORM);
       } else {
-        displayKp = kp;
+        displayKp = kpFullFrame;
       }
 
       // (b) Analysis copy — FSM normalization so +y = gravity in every orientation.
@@ -659,6 +772,30 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       } else {
         fsmKp = kp;
       }
+
+      // ---------------------------------------------------------------------------
+      // STAGE 2 — apply the "cover" crop correction to displayKp (see
+      // applyCoverCropCorrection above), on top of STAGE 1's full-frame-relative coordinates.
+      // displayKp may have an ADDITIONAL axis swap on top of that, from applyOverlayTransform
+      // above (based on orientationDeg, a separate concept — live device rotation only, used
+      // to lay the model's native-orientation square onto the current screen's layout).
+      const displayAxesSwapped = orientationDeg === 90 || orientationDeg === 270;
+      const contentAspectDisplay = displayAxesSwapped ? rotatedFrameH / rotatedFrameW : rotatedFrameW / rotatedFrameH;
+      const screenAspect = previewWidthRef.current / previewHeightRef.current;
+
+      // TEMP — diagnosing the skeleton-alignment aspect-ratio math. Remove once confirmed fixed.
+      if (Date.now() - lastAlignLogRef.current >= 2000) {
+        lastAlignLogRef.current = Date.now();
+        const branch = contentAspectDisplay > screenAspect ? 'crop-X' : contentAspectDisplay < screenAspect ? 'crop-Y' : 'none';
+        console.log(
+          `[ALIGN] rotatedFrame=${rotatedFrameW}x${rotatedFrameH} preview=${previewWidthRef.current}x${previewHeightRef.current}` +
+          ` contentAspect=${contentAspectDisplay.toFixed(4)} screenAspect=${screenAspect.toFixed(4)} branch=${branch}` +
+          ` orientationDeg=${orientationDeg} displayAxesSwapped=${displayAxesSwapped}`
+        );
+      }
+
+      displayKp = applyCoverCropCorrection(displayKp, contentAspectDisplay, screenAspect);
+      // ---------------------------------------------------------------------------
 
       animatedKeypoints.value = withTiming(displayKp, {
         duration: SMOOTHING_MS,
@@ -790,7 +927,8 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         return; // Never call FSMs during countdown.
       }
 
-      // 'active' — existing FSM logic.
+      // 'active' — existing FSM logic. fsmKp is the raw, un-cropped-back model output (see
+      // the NOTE above applyCoverCropCorrection for why no correction is needed here).
       switch (exerciseId) {
         case 'squat': {
           const s = squatFsmRef.current.update(fsmKp);
@@ -841,6 +979,15 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       const baseDeg = getCounterRotationDeg(frame.orientation);
       const totalDeg = (baseDeg + deviceOrientationDeg.value) % 360;
       const rotation = degreesToResizeRotation(totalDeg);
+      // True upright content dimensions (MODEL's own kp-native axis convention), accounting
+      // for totalDeg — the ACTUAL rotation applied below by resize(). Deliberately NOT based
+      // on deviceOrientationDeg.value alone (orientationDeg downstream): the camera sensor is
+      // typically mounted 90/270 rotated relative to how the phone is normally held, so
+      // baseDeg alone often makes totalDeg 90/270 even in plain portrait with zero live
+      // device rotation. Computed here, in the worklet, so there's one source of truth.
+      const frameIsRotated = totalDeg === 90 || totalDeg === 270;
+      const rotatedFrameW = frameIsRotated ? frame.height : frame.width;
+      const rotatedFrameH = frameIsRotated ? frame.width : frame.height;
       const resizeStartedAt = Date.now();
       const resized = resize(frame, {
         scale: { width: 192, height: 192 },
@@ -860,7 +1007,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       const inferElapsedMs = Date.now() - inferStartedAt;
 
       const out = new Float32Array(outputs[0]!);
-      updateKeypoints(Array.from(out), inferElapsedMs, resizeElapsedMs, deviceOrientationDeg.value, frameCount.value);
+      updateKeypoints(Array.from(out), inferElapsedMs, resizeElapsedMs, deviceOrientationDeg.value, frameCount.value, rotatedFrameW, rotatedFrameH);
     },
     [boxedModel, frameCount, deviceOrientationDeg, resize, updateKeypoints]
   );
@@ -958,6 +1105,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       <Camera
         style={StyleSheet.absoluteFill}
         device={device}
+        format={format}
         isActive={!isChatOpen}
         frameProcessor={frameProcessor}
         onOutputOrientationChanged={(orientation) => {
