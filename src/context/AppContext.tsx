@@ -6,20 +6,23 @@ import { loadProfile, saveProfile, patchProfile } from '../services/firebaseProf
 import { saveSession, loadSessions } from '../services/firebaseWorkout';
 import { todayMYTDateStr } from '../utils/mytDate';
 import { computeStreak } from '../utils/streak';
+import { computeEligibleLevel, isHigherLevel } from '../utils/experienceLevel';
+import { getLevelUpMessage } from '../services/aiCoach';
+import { setVoiceProfile } from '../services/ttsService';
+import { syncReminderState } from '../services/notificationsService';
 
 export type Gender = 'male' | 'female' | 'other';
 export type FitnessGoal = 'lose_weight' | 'build_muscle' | 'improve_endurance' | 'flexibility';
 export type ExperienceLevel = 'beginner' | 'intermediate' | 'advanced';
-export type AvatarStyle = 'male_athletic' | 'male_casual' | 'female_athletic' | 'female_casual';
-export type VoiceType = 'energetic_male' | 'calm_male' | 'energetic_female' | 'calm_female';
+export type VoiceType = 'male' | 'female';
 
 export interface UserProfile {
   name: string;
   gender: Gender;
   goal: FitnessGoal;
   level: ExperienceLevel;
-  avatar: AvatarStyle;
   voice: VoiceType;
+  notificationsEnabled: boolean;
   streak: number;
   totalWorkouts: number;
   totalReps: number;
@@ -101,6 +104,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return unsub;
   }, []);
 
+  // Keeps ttsService's module-level voice profile in sync with Settings' Voice Type picker,
+  // wherever in the app that setting was last changed (or on initial profile load).
+  useEffect(() => {
+    if (profile?.voice) setVoiceProfile(profile.voice);
+  }, [profile?.voice]);
+
   const setProfile = useCallback((p: UserProfile) => {
     setProfileState(p);
     const uid = authUserRef.current?.uid;
@@ -125,15 +134,53 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Streak/totalWorkouts/totalReps are derived from actual session history rather than
   // incremented/decremented imperatively, so they're always correct on load and never
   // silently go stale or desync from what's actually in workoutHistory.
+  //
+  // Experience level auto-upgrades the same way: computeEligibleLevel looks at how long ago
+  // the user's FIRST logged session was (not account-creation date) and how many sessions
+  // they've logged since, and this only ever moves the stored level UP — it never overrides
+  // a level the user set themselves (at onboarding or later in Settings) that's already at
+  // or above what their history alone would earn. Re-running whenever `profile` changes is
+  // what lets this settle to "no further upgrade due" on the next pass after updateProfile
+  // applies one, rather than needing separate one-shot tracking.
   useEffect(() => {
     if (!profile) return;
     const streak = computeStreak(workoutHistory);
     const totalWorkouts = workoutHistory.length;
     const totalReps = workoutHistory.reduce((sum, s) => sum + s.reps, 0);
-    if (streak !== profile.streak || totalWorkouts !== profile.totalWorkouts || totalReps !== profile.totalReps) {
-      updateProfile({ streak, totalWorkouts, totalReps });
+    const patch: Partial<UserProfile> = {};
+    if (streak !== profile.streak) patch.streak = streak;
+    if (totalWorkouts !== profile.totalWorkouts) patch.totalWorkouts = totalWorkouts;
+    if (totalReps !== profile.totalReps) patch.totalReps = totalReps;
+
+    const eligibleLevel = computeEligibleLevel(workoutHistory);
+    if (isHigherLevel(eligibleLevel, profile.level)) {
+      patch.level = eligibleLevel;
+      getLevelUpMessage(eligibleLevel, profile.goal).then((msg) => {
+        if (msg) setLastCoachMessage(msg);
+      }).catch(() => {});
+    }
+
+    if (Object.keys(patch).length > 0) {
+      updateProfile(patch);
     }
   }, [workoutHistory, profile, updateProfile]);
+
+  // Keeps the OS-scheduled daily reminder in sync with the profile's notificationsEnabled
+  // field, on every load/change — not just when the user flips the Settings toggle — since
+  // the ACTUAL OS-level schedule is per-device and doesn't transfer with a synced profile
+  // (e.g. a fresh install or a new device needs its own real scheduleNotificationAsync call
+  // even though the stored preference already says "on"). If the user wants reminders on
+  // but OS permission was denied, this reverts the stored field to false so it can't claim
+  // to be "on" while nothing is actually scheduled — SettingsScreen's own toggle handler is
+  // what shows the user-facing "permission denied" alert at the moment they flip it.
+  useEffect(() => {
+    if (!profile) return;
+    syncReminderState(profile.notificationsEnabled).then((granted) => {
+      if (!granted && profile.notificationsEnabled) {
+        updateProfile({ notificationsEnabled: false });
+      }
+    }).catch(() => {});
+  }, [profile?.notificationsEnabled, updateProfile]);
 
   const signOutUser = useCallback(async () => {
     await logout();

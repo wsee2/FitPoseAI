@@ -30,6 +30,9 @@ import { EXERCISES, formatDuration, type WorkoutSession } from '../data/exercise
 import { todayMYTDateStr } from '../utils/mytDate';
 
 import { speakFeedback, speakImmediate, reset as ttsReset } from '../services/ttsService';
+import { pulseRep } from '../services/hapticsService';
+import { EncouragementEngine } from '../services/encouragementService';
+import { getDefaultTarget, DEFAULT_SETS } from '../utils/workoutTarget';
 import { INITIAL_SQUAT_STATE, SquatFsm, type SquatFsmState } from '../services/fsm/squatFsm';
 import { INITIAL_PUSHUP_STATE, PushupFsm, type PushupFsmState } from '../services/fsm/pushupFsm';
 import { INITIAL_LUNGE_STATE, LungeFsm, type LungeFsmState } from '../services/fsm/lungeFsm';
@@ -38,6 +41,7 @@ import { INITIAL_SITUP_STATE, SitupFsm, type SitupFsmState } from '../services/f
 import SkeletonOverlay, { CONF_THRESHOLD, STATUS_COLORS, type SkeletonStatus } from '../components/SkeletonOverlay';
 import CoachAvatarCircle from '../components/CoachAvatarCircle';
 import WorkoutChatOverlay from '../components/WorkoutChatOverlay';
+import FireBorderPulse from '../components/FireBorderPulse';
 
 /** Pulls the exercise-specific (reps, score) pair out of whichever FSM is active. */
 function getFinalStats(
@@ -76,7 +80,15 @@ const SMOOTHING_MS = 16;
 
 const ROBOT_DEBOUNCE_MS = 800;
 const ROBOT_HAPPY_DURATION_MS = 1500;
+// Longer than the normal per-rep flash so reaching the workout target reads as a distinct
+// celebration rather than blending into the same brief happy-flash every other rep gets.
+const ROBOT_TARGET_CELEBRATION_MS = 2500;
 const ROBOT_MIN_TRACKED_KPS = 8;
+// Fixed delay between "target reached" (non-final set) and the auto-transition into the
+// 'setComplete' rest screen. Deliberately a fixed timer, not "wait for confirmed spoken" —
+// the latter risks never firing if the user reps fast enough that the encouragement message
+// never wins ttsService's rate-limit race, which would strand them in a set that already ended.
+const SET_COMPLETE_TRANSITION_DELAY_MS = 2500;
 
 // ── WORKOUT SCREEN ROBOT LAYOUT ──────────────────────────────────────────────
 // WORKOUT_ROBOT_SIZE — circular avatar diameter in dp.
@@ -209,7 +221,7 @@ function applyCoverCropCorrection(kp: number[], contentAspect: number, screenAsp
 
 // ---------------------------------------------------------------------------
 // Calibration phase
-type WorkoutPhase = 'calibrating' | 'countdown' | 'active';
+type WorkoutPhase = 'calibrating' | 'countdown' | 'active' | 'setComplete';
 
 // Keypoints that must ALL be visible before the workout starts.
 // Ankles (15, 16) intentionally excluded — they're the least reliable and often
@@ -337,7 +349,11 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   );
 
   const { hasPermission, requestPermission } = useCameraPermission();
-  const { addWorkoutSession, workoutHistory, setLastCoachMessage } = useApp();
+  const { addWorkoutSession, workoutHistory, setLastCoachMessage, profile } = useApp();
+  // route.params.target/sets cover WorkoutSetupScreen's steppers; the fallback covers any
+  // path that skips that screen entirely (e.g. a future deep link straight into Workout).
+  const target = route.params.target ?? getDefaultTarget(exerciseId, profile?.level ?? 'beginner');
+  const totalSets = route.params.sets ?? DEFAULT_SETS;
   const frontDevice = useCameraDevice('front');
   const backDevice = useCameraDevice('back');
   const liveDevice = frontDevice ?? backDevice;
@@ -382,12 +398,34 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const [plankState, setPlankState] = useState<PlankFsmState>(INITIAL_PLANK_STATE);
   const situpFsmRef = useRef(new SitupFsm());
   const [situpState, setSitupState] = useState<SitupFsmState>(INITIAL_SITUP_STATE);
+  const encouragementRef = useRef(new EncouragementEngine());
 
   // Coach robot expression
   const [coachExpression, setCoachExpression] = useState(1);
   const coachExpressionRef = useRef(1);
   const expressionLockedUntilRef = useRef(0);
   const prevRepCountRef = useRef(0);
+  const prevPlankHoldingRef = useRef(false);
+  const plankTargetCelebratedRef = useRef(false);
+
+  // Fire border pulse — purely visual, additive to the existing target-reached celebration.
+  // Triggered at the exact same instant as ROBOT_TARGET_CELEBRATION_MS (fires on every set,
+  // final or not), with its own independent 2500ms on-window so it never touches
+  // setTransitionScheduledRef/setCompleteTimerRef (the actual set-complete phase transition).
+  const [firePulseActive, setFirePulseActive] = useState(false);
+  const firePulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Multi-set bookkeeping.
+  // currentSet is 1-indexed and only ever advances via handleNextSet (tapped from the
+  // 'setComplete' rest screen) — never auto-advances on a timer by itself.
+  const [currentSet, setCurrentSet] = useState(1);
+  // Finalized {reps, score} for each set completed BEFORE the current one — the current set's
+  // live stats come from finalStatsRef (below) and are appended at save time, not here.
+  const completedSetsRef = useRef<{ reps: number; score: number }[]>([]);
+  // Guards the target-reached -> setComplete auto-transition so it only ever schedules once
+  // per set, even though the driving effect below re-runs on every FSM update.
+  const setTransitionScheduledRef = useRef(false);
+  const setCompleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Session bookkeeping
   const sessionStartRef = useRef(Date.now());
@@ -516,10 +554,31 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         setSitupState(INITIAL_SITUP_STATE);
         break;
     }
-    sessionStartRef.current = Date.now();
+    // currentSet is always 1 at this point — this effect only fires on mount (deps below
+    // never change after the initial navigation into this screen). The guard mirrors the
+    // countdown-completion effect's for consistency/defensiveness, not because it's reachable
+    // here with currentSet > 1.
+    if (currentSet === 1) sessionStartRef.current = Date.now();
     hasSavedRef.current = false;
     ttsReset();
-  }, [exerciseId]);
+    encouragementRef.current.reset(target);
+    plankTargetCelebratedRef.current = false;
+    prevRepCountRef.current = 0;
+    prevPlankHoldingRef.current = false;
+    setFirePulseActive(false);
+    if (firePulseTimerRef.current) {
+      clearTimeout(firePulseTimerRef.current);
+      firePulseTimerRef.current = null;
+    }
+
+    // Fresh screen entry — clear any multi-set progress from a previous exercise/session.
+    completedSetsRef.current = [];
+    setTransitionScheduledRef.current = false;
+    if (setCompleteTimerRef.current) {
+      clearTimeout(setCompleteTimerRef.current);
+      setCompleteTimerRef.current = null;
+    }
+  }, [exerciseId, target]);
 
   // Countdown timer: fires when phase transitions to 'countdown'.
   useEffect(() => {
@@ -549,10 +608,31 @@ export default function WorkoutScreen({ navigation, route }: Props) {
           case 'plank':  plankFsmRef.current.reset();  setPlankState(INITIAL_PLANK_STATE);   break;
           case 'situp':  situpFsmRef.current.reset();  setSitupState(INITIAL_SITUP_STATE);   break;
         }
-        // Session timer starts NOW (not at screen mount, not during calibration).
-        sessionStartRef.current = Date.now();
+        // Session timer starts NOW (not at screen mount, not during calibration) — but only
+        // for set 1. Later sets reuse this same countdown flow (via handleNextSet), and must
+        // NOT push sessionStartRef forward, or the saved duration would only cover the final
+        // set instead of the whole multi-set session.
+        if (currentSet === 1) sessionStartRef.current = Date.now();
         hasSavedRef.current = false;
         ttsReset();
+        encouragementRef.current.reset(target);
+        plankTargetCelebratedRef.current = false;
+        setTransitionScheduledRef.current = false;
+        if (setCompleteTimerRef.current) {
+          clearTimeout(setCompleteTimerRef.current);
+          setCompleteTimerRef.current = null;
+        }
+        // Without these, a set-2+ FSM reset (counter back to 0 / isHolding back to false)
+        // would look like "no progress" against these refs' stale end-of-previous-set values
+        // (e.g. prevRepCountRef left at the old target) — silently suppressing the
+        // rep-completion happy-flash/haptic and plank's hold-start pulse for every later set.
+        prevRepCountRef.current = 0;
+        prevPlankHoldingRef.current = false;
+        setFirePulseActive(false);
+        if (firePulseTimerRef.current) {
+          clearTimeout(firePulseTimerRef.current);
+          firePulseTimerRef.current = null;
+        }
 
         phaseRef.current = 'active';
         setPhase('active');
@@ -571,7 +651,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       clearInterval(timer);
       countdownTimerRef.current = null;
     };
-  }, [phase, exerciseId]);
+  }, [phase, exerciseId, target, currentSet]);
 
   const finalStatsRef = useRef({ reps: 0, score: 0 });
   finalStatsRef.current = getFinalStats(
@@ -580,7 +660,14 @@ export default function WorkoutScreen({ navigation, route }: Props) {
 
   const persistSession = useCallback((): WorkoutSession | undefined => {
     if (hasSavedRef.current) return undefined;
-    const { reps, score } = finalStatsRef.current;
+    // One WorkoutSession per whole multi-set workout — completed prior sets plus whatever the
+    // current (possibly still in-progress, if Finish was tapped mid-set) set has racked up.
+    // Reps summed, score averaged; Analytics/experience-level-upgrade code counts sessions by
+    // record, so folding sets into one record (rather than one record per set) keeps that math
+    // correct — see workoutTarget/experienceLevel.
+    const allSets = [...completedSetsRef.current, finalStatsRef.current];
+    const reps = allSets.reduce((sum, s) => sum + s.reps, 0);
+    const score = Math.round(allSets.reduce((sum, s) => sum + s.score, 0) / allSets.length);
     if (reps <= 0 && score <= 0) return undefined;
     hasSavedRef.current = true;
 
@@ -597,14 +684,15 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       formQuality:
         score >= 90 ? 'Excellent' : score >= 75 ? 'Good' : score >= 60 ? 'Fair' : 'Needs Work',
       source: 'live',
+      sets: allSets.length,
     };
     addWorkoutSession(session); // also persists to Firebase via AppContext
     // Fire proactive AI coaching message async — non-blocking, stores in context when ready.
-    getSessionEndMessage(session, workoutHistory).then(msg => {
+    getSessionEndMessage(session, workoutHistory, profile).then(msg => {
       if (msg) setLastCoachMessage(msg);
     }).catch(() => {});
     return session;
-  }, [exerciseId, addWorkoutSession, workoutHistory, setLastCoachMessage]);
+  }, [exerciseId, addWorkoutSession, workoutHistory, setLastCoachMessage, profile]);
 
   const handleFinish = useCallback(() => {
     const session = persistSession();
@@ -620,7 +708,17 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   useEffect(() => {
     return () => {
       persistSessionRef.current();
+      if (setCompleteTimerRef.current) clearTimeout(setCompleteTimerRef.current);
+      if (firePulseTimerRef.current) clearTimeout(firePulseTimerRef.current);
     };
+  }, []);
+
+  // Tapped from the 'setComplete' rest screen — advances to the next set and re-enters the
+  // existing countdown flow (3-2-1, then a clean FSM reset), never an automatic timer.
+  const handleNextSet = useCallback(() => {
+    setCurrentSet((s) => s + 1);
+    phaseRef.current = 'countdown';
+    setPhase('countdown');
   }, []);
 
   const handleOpenChat = useCallback(() => {
@@ -648,6 +746,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       case 'plank':  plankFsmRef.current.pauseForChat();  break;
       case 'situp':  situpFsmRef.current.pauseForChat();  break;
     }
+    encouragementRef.current.pauseForChat();
 
     setIsChatOpen(true);
   }, [exerciseId]);
@@ -927,37 +1026,61 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         return; // Never call FSMs during countdown.
       }
 
+      if (currentPhase === 'setComplete') return; // Rest screen — FSMs paused between sets.
+
       // 'active' — existing FSM logic. fsmKp is the raw, un-cropped-back model output (see
       // the NOTE above applyCoverCropCorrection for why no correction is needed here).
+      // Each case: FSM feedback still takes priority — encouragementRef only ever returns a
+      // candidate message when form status is 'good'/'guide' (see peekReps/peekHold), so on
+      // 'adjust'/'error' encouragement is null and s.feedback (the correction) is spoken
+      // exactly as before. speakFeedback's own rate limiter decides whether it actually
+      // speaks THIS frame; confirmSpoken() only dequeues the message once it's confirmed
+      // spoken, so a message that loses that race stays queued for a later frame instead of
+      // being lost.
       switch (exerciseId) {
         case 'squat': {
           const s = squatFsmRef.current.update(fsmKp);
           setSquatState(s);
-          speakFeedback(s.feedback);
+          const encouragement = encouragementRef.current.peekReps(s.counter, s.status);
+          if (speakFeedback(encouragement ?? s.feedback) && encouragement) {
+            encouragementRef.current.confirmSpoken();
+          }
           break;
         }
         case 'pushup': {
           const s = pushupFsmRef.current.update(fsmKp);
           setPushupState(s);
-          speakFeedback(s.feedback);
+          const encouragement = encouragementRef.current.peekReps(s.counter, s.status);
+          if (speakFeedback(encouragement ?? s.feedback) && encouragement) {
+            encouragementRef.current.confirmSpoken();
+          }
           break;
         }
         case 'lunge': {
           const s = lungeFsmRef.current.update(fsmKp);
           setLungeState(s);
-          speakFeedback(s.feedback);
+          const encouragement = encouragementRef.current.peekReps(s.counter, s.status);
+          if (speakFeedback(encouragement ?? s.feedback) && encouragement) {
+            encouragementRef.current.confirmSpoken();
+          }
           break;
         }
         case 'plank': {
           const s = plankFsmRef.current.update(fsmKp);
           setPlankState(s);
-          speakFeedback(s.feedback);
+          const encouragement = encouragementRef.current.peekHold(s.holdSeconds, s.status);
+          if (speakFeedback(encouragement ?? s.feedback) && encouragement) {
+            encouragementRef.current.confirmSpoken();
+          }
           break;
         }
         case 'situp': {
           const s = situpFsmRef.current.update(fsmKp);
           setSitupState(s);
-          speakFeedback(s.feedback);
+          const encouragement = encouragementRef.current.peekReps(s.counter, s.status);
+          if (speakFeedback(encouragement ?? s.feedback) && encouragement) {
+            encouragementRef.current.confirmSpoken();
+          }
           break;
         }
       }
@@ -1055,9 +1178,40 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         situpState.counter;
       if (repCount > prevRepCountRef.current) {
         prevRepCountRef.current = repCount;
+        pulseRep();
         coachExpressionRef.current = 2;
-        expressionLockedUntilRef.current = now + ROBOT_HAPPY_DURATION_MS;
+        // Target-reaching rep gets a longer, distinct celebration lock; every other rep
+        // keeps the normal brief flash. Purely cosmetic — doesn't touch counting/Finish.
+        expressionLockedUntilRef.current =
+          now + (repCount === target ? ROBOT_TARGET_CELEBRATION_MS : ROBOT_HAPPY_DURATION_MS);
         setCoachExpression(2);
+
+        // Fire border pulse — fires on EVERY target-reached moment, final set included,
+        // independent of the non-final-set-only setComplete transition scheduled below.
+        if (repCount === target) {
+          setFirePulseActive(true);
+          if (firePulseTimerRef.current) clearTimeout(firePulseTimerRef.current);
+          firePulseTimerRef.current = setTimeout(() => {
+            firePulseTimerRef.current = null;
+            setFirePulseActive(false);
+          }, ROBOT_TARGET_CELEBRATION_MS);
+        }
+
+        // Non-final set reaching its target: schedule the rest-screen transition after a
+        // fixed delay (see SET_COMPLETE_TRANSITION_DELAY_MS). The FSM keeps running until the
+        // timer fires, so a fast user may rack up a couple extra reps in that window — that's
+        // fine, same non-blocking philosophy as the single-set target celebration.
+        if (repCount === target && currentSet < totalSets && !setTransitionScheduledRef.current) {
+          setTransitionScheduledRef.current = true;
+          const justCompletedSet = currentSet;
+          setCompleteTimerRef.current = setTimeout(() => {
+            setCompleteTimerRef.current = null;
+            completedSetsRef.current = [...completedSetsRef.current, finalStatsRef.current];
+            speakImmediate(`Set ${justCompletedSet} done!`);
+            phaseRef.current = 'setComplete';
+            setPhase('setComplete');
+          }, SET_COMPLETE_TRANSITION_DELAY_MS);
+        }
         return;
       }
       prevRepCountRef.current = repCount;
@@ -1078,8 +1232,48 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       expressionLockedUntilRef.current = now + ROBOT_DEBOUNCE_MS;
       setCoachExpression(desired);
     }
-  }, [phase, currentStatus, trackedCount, exerciseId,
+  }, [phase, currentStatus, trackedCount, exerciseId, target, currentSet, totalSets,
       squatState.counter, pushupState.counter, lungeState.counter, situpState.counter]);
+
+  // Plank has no discrete reps to hang the rep-completion haptic on (see the effect above,
+  // which explicitly excludes it) — pulse instead each time a hold actually starts/resumes,
+  // a separate, minimal effect so this doesn't entangle with the expression-driving one above.
+  // Also fires plank's own once-per-session target-reached celebration here, mirroring the
+  // rep-based effect's ROBOT_TARGET_CELEBRATION_MS treatment — purely cosmetic, doesn't touch
+  // the hold timer or Finish.
+  useEffect(() => {
+    if (exerciseId === 'plank' && plankState.isHolding && !prevPlankHoldingRef.current) {
+      pulseRep();
+    }
+    if (exerciseId === 'plank' && plankState.holdSeconds >= target && !plankTargetCelebratedRef.current) {
+      plankTargetCelebratedRef.current = true;
+      coachExpressionRef.current = 2;
+      expressionLockedUntilRef.current = Date.now() + ROBOT_TARGET_CELEBRATION_MS;
+      setCoachExpression(2);
+
+      // Fire border pulse — same trigger point as the rep-based branch above.
+      setFirePulseActive(true);
+      if (firePulseTimerRef.current) clearTimeout(firePulseTimerRef.current);
+      firePulseTimerRef.current = setTimeout(() => {
+        firePulseTimerRef.current = null;
+        setFirePulseActive(false);
+      }, ROBOT_TARGET_CELEBRATION_MS);
+
+      // Same fixed-delay rest-screen transition as the rep-based exercises above.
+      if (exerciseId === 'plank' && currentSet < totalSets && !setTransitionScheduledRef.current) {
+        setTransitionScheduledRef.current = true;
+        const justCompletedSet = currentSet;
+        setCompleteTimerRef.current = setTimeout(() => {
+          setCompleteTimerRef.current = null;
+          completedSetsRef.current = [...completedSetsRef.current, finalStatsRef.current];
+          speakImmediate(`Set ${justCompletedSet} done!`);
+          phaseRef.current = 'setComplete';
+          setPhase('setComplete');
+        }, SET_COMPLETE_TRANSITION_DELAY_MS);
+      }
+    }
+    prevPlankHoldingRef.current = plankState.isHolding;
+  }, [exerciseId, plankState.isHolding, plankState.holdSeconds, target, currentSet, totalSets]);
 
   if (!hasPermission) {
     return (
@@ -1127,6 +1321,13 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         height={previewHeight}
       />
 
+      {/* Fire border pulse — set-completion celebration. No explicit zIndex: declared here
+          (right after the camera/skeleton) so every later-declared overlay (Finish button,
+          calibration/countdown/set-complete cards, rep panels, debug badge) paints on top of
+          it by declaration order, keeping it strictly behind all real UI chrome. statusBorder/
+          perfHud/the coach avatar have their own explicit zIndex and stay above it too. */}
+      <FireBorderPulse active={firePulseActive} />
+
       {/* Finish button */}
       <TouchableOpacity
         style={[styles.finishBtn, { top: insets.top + 12 }]}
@@ -1171,40 +1372,55 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         </View>
       )}
 
+      {phase === 'setComplete' && (
+        <View style={styles.setCompleteOverlay}>
+          <Text style={styles.setCompleteTitle}>SET {currentSet} COMPLETE</Text>
+          <Text style={styles.setCompleteSub}>Take a breather, then continue when ready.</Text>
+          <TouchableOpacity style={styles.nextSetBtn} onPress={handleNextSet} activeOpacity={0.85}>
+            <Text style={styles.nextSetBtnText}>Next Set — {currentSet + 1} of {totalSets}</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* ------------------------------------------------------------------ */}
       {/* Active phase UI — rep/hold panels                                  */}
       {/* ------------------------------------------------------------------ */}
       {phase === 'active' && exerciseId === 'squat' && (
         <View style={[styles.repPanel, repPanelDynamicStyle]}>
-          <Text style={styles.repCount}>{squatState.counter}</Text>
+          {totalSets > 1 && <Text style={styles.setLabel}>SET {currentSet} / {totalSets}</Text>}
+          <Text style={styles.repCount}>{squatState.counter}<Text style={styles.repTarget}> / {target}</Text></Text>
           <Text style={styles.stageLabel}>{squatState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{squatState.feedback}</Text>
         </View>
       )}
       {phase === 'active' && exerciseId === 'pushup' && (
         <View style={[styles.repPanel, repPanelDynamicStyle]}>
-          <Text style={styles.repCount}>{pushupState.counter}</Text>
+          {totalSets > 1 && <Text style={styles.setLabel}>SET {currentSet} / {totalSets}</Text>}
+          <Text style={styles.repCount}>{pushupState.counter}<Text style={styles.repTarget}> / {target}</Text></Text>
           <Text style={styles.stageLabel}>{pushupState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{pushupState.feedback}</Text>
         </View>
       )}
       {phase === 'active' && exerciseId === 'lunge' && (
         <View style={[styles.repPanel, repPanelDynamicStyle]}>
-          <Text style={styles.repCount}>{lungeState.counter}</Text>
+          {totalSets > 1 && <Text style={styles.setLabel}>SET {currentSet} / {totalSets}</Text>}
+          <Text style={styles.repCount}>{lungeState.counter}<Text style={styles.repTarget}> / {target}</Text></Text>
           <Text style={styles.stageLabel}>{lungeState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{lungeState.feedback}</Text>
         </View>
       )}
       {phase === 'active' && exerciseId === 'plank' && (
         <View style={[styles.repPanel, repPanelDynamicStyle]}>
-          <Text style={styles.repCount}>{formatDuration(plankState.holdSeconds)}</Text>
+          {totalSets > 1 && <Text style={styles.setLabel}>SET {currentSet} / {totalSets}</Text>}
+          <Text style={styles.repCount}>{formatDuration(plankState.holdSeconds)}<Text style={styles.repTarget}> / {formatDuration(target)}</Text></Text>
           <Text style={styles.stageLabel}>{plankState.isHolding ? 'HOLDING' : 'PAUSED'}</Text>
           <Text style={styles.feedbackText}>{plankState.feedback}</Text>
         </View>
       )}
       {phase === 'active' && exerciseId === 'situp' && (
         <View style={[styles.repPanel, repPanelDynamicStyle]}>
-          <Text style={styles.repCount}>{situpState.counter}</Text>
+          {totalSets > 1 && <Text style={styles.setLabel}>SET {currentSet} / {totalSets}</Text>}
+          <Text style={styles.repCount}>{situpState.counter}<Text style={styles.repTarget}> / {target}</Text></Text>
           <Text style={styles.stageLabel}>{situpState.stage ?? '—'}</Text>
           <Text style={styles.feedbackText}>{situpState.feedback}</Text>
         </View>
@@ -1363,6 +1579,44 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     marginTop: -20,
   },
+  // Set-complete rest screen — shown between sets. User-tapped continue, never an
+  // auto-advancing timer (see SET_COMPLETE_TRANSITION_DELAY_MS, which only governs the
+  // celebration -> this screen transition, not this screen -> the next set).
+  setCompleteOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    paddingHorizontal: 32,
+  },
+  setCompleteTitle: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '900',
+    letterSpacing: 1,
+    textShadowColor: '#00E5FF',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 20,
+  },
+  setCompleteSub: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 15,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 10,
+    marginBottom: 32,
+  },
+  nextSetBtn: {
+    backgroundColor: '#00E5FF',
+    paddingHorizontal: 28,
+    paddingVertical: 16,
+    borderRadius: 28,
+  },
+  nextSetBtnText: {
+    color: '#000',
+    fontSize: 16,
+    fontWeight: '800',
+  },
   // Active phase UI
   debugBadge: {
     position: 'absolute',
@@ -1386,10 +1640,26 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderRadius: 16,
   },
+  setLabel: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 2,
+  },
   repCount: {
     color: '#fff',
     fontSize: 48,
     fontWeight: '800',
+  },
+  // Nested inside repCount's <Text> (RN supports differently-styled nested Text inline) —
+  // deliberately much smaller than repCount so "/ 12" reads as a subordinate suffix rather
+  // than doubling the panel's visual weight. Auto-sizes with content since repPanel has no
+  // fixed width, so this only ever makes the panel modestly wider, never wraps/clips.
+  repTarget: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 22,
+    fontWeight: '700',
   },
   stageLabel: {
     color: '#00E5FF',

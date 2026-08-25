@@ -11,7 +11,7 @@ import { StatCard } from '../components/ui/StatCard';
 import { NeonButton } from '../components/ui/NeonButton';
 import { ProgressRing } from '../components/ui/ProgressRing';
 import { useApp } from '../context/AppContext';
-import { EXERCISES, MOCK_HISTORY, formatDuration, getScoreGrade } from '../data/exercises';
+import { EXERCISES, MOCK_HISTORY, formatDuration, formatRepsOrHold, getScoreGrade } from '../data/exercises';
 import type { HomeScreenNavigationProp } from '../navigation/types';
 import { saveWorkout } from '../services/firebaseWorkout';
 
@@ -154,7 +154,7 @@ export default function HomeScreen({ navigation }: Props) {
               <TouchableOpacity
                 key={ex.id}
                 style={styles.exercisePill}
-                onPress={() => navigation.navigate('Workout', { exerciseId: ex.id })}
+                onPress={() => navigation.navigate('WorkoutSetup', { exerciseId: ex.id })}
                 activeOpacity={0.82}
               >
                 <LinearGradient
@@ -193,7 +193,7 @@ export default function HomeScreen({ navigation }: Props) {
                     </View>
                     <View style={styles.sessionInfo}>
                       <Text style={styles.sessionName}>{ex.name}</Text>
-                      <Text style={styles.sessionMeta}>{session.reps} reps · {formatDuration(session.duration)} · {session.date}</Text>
+                      <Text style={styles.sessionMeta}>{formatRepsOrHold(session)} · {formatDuration(session.duration)} · {session.date}</Text>
                     </View>
                     <View style={styles.sessionScore}>
                       <Text style={[styles.sessionGrade, { color: grade.color }]}>{grade.grade}</Text>

@@ -37,7 +37,7 @@ interface Props {
  * survive if the user opens/closes it more than once during the same workout.
  */
 export default function WorkoutChatOverlay({ visible, onClose, exerciseName, currentProgressLabel }: Props) {
-  const { workoutHistory } = useApp();
+  const { workoutHistory, profile } = useApp();
   const insets = useSafeAreaInsets();
   const chatRef = useRef<ChatSession | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -94,7 +94,7 @@ export default function WorkoutChatOverlay({ visible, onClose, exerciseName, cur
       date: todayMYTDateStr(),
     };
     if (!chatRef.current) {
-      chatRef.current = createChatSession(workoutHistory, current);
+      chatRef.current = createChatSession(workoutHistory, current, profile);
       setMessages([{
         id: 'greeting',
         role: 'coach',

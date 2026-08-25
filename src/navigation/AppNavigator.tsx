@@ -25,6 +25,7 @@ import SignUpScreen from '../screens/SignUpScreen';
 import ProfileSetupScreen from '../screens/ProfileSetupScreen';
 import HomeScreen from '../screens/HomeScreen';
 import ExerciseSelectScreen from '../screens/ExerciseSelectScreen';
+import WorkoutSetupScreen from '../screens/WorkoutSetupScreen';
 import WorkoutScreen from '../screens/WorkoutScreen';
 import SessionSummaryScreen from '../screens/SessionSummaryScreen';
 import AnalyticsScreen from '../screens/AnalyticsScreen';
@@ -46,6 +47,7 @@ const HomeNavigator = () => (
   <HomeStack.Navigator screenOptions={{ headerShown: false }}>
     <HomeStack.Screen name="Home" component={HomeScreen} />
     <HomeStack.Screen name="ExerciseSelect" component={ExerciseSelectScreen} />
+    <HomeStack.Screen name="WorkoutSetup" component={WorkoutSetupScreen} />
     <HomeStack.Screen name="Workout" component={WorkoutScreen} />
     <HomeStack.Screen name="SessionSummary" component={SessionSummaryScreen} />
     {/* VideoAnalysis hidden — feature deprioritised, see report future work.

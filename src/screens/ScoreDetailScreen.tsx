@@ -6,7 +6,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors, BorderRadius } from '../theme';
 import { useApp } from '../context/AppContext';
-import { EXERCISES, formatDuration } from '../data/exercises';
+import { EXERCISES, formatDuration, formatRepsOrHold } from '../data/exercises';
 import { ExerciseIcon } from '../components/ui/ExerciseIcon';
 import { MYT_OFFSET_MS, todayInMYT, mytDateStr, parseMYTDateStr } from '../utils/mytDate';
 import type { ScoreDetailNavigationProp, ScoreDetailRouteProp } from '../navigation/types';
@@ -133,7 +133,7 @@ export default function ScoreDetailScreen({ navigation, route }: Props) {
       </View>
 
       <ScrollView
-        contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 40 }]}
+        contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 90 }]}
         showsVerticalScrollIndicator={false}
       >
         {/* Chip picker */}
@@ -225,7 +225,7 @@ export default function ScoreDetailScreen({ navigation, route }: Props) {
                   <View style={styles.sessionInfo}>
                     <Text style={styles.sessionName}>{ex.name}</Text>
                     <View style={styles.sessionMeta}>
-                      <Text style={styles.sessionMetaText}>{session.reps} reps</Text>
+                      <Text style={styles.sessionMetaText}>{formatRepsOrHold(session)}</Text>
                       <Text style={styles.sessionMetaDot}>·</Text>
                       <Text style={styles.sessionMetaText}>{formatDuration(session.duration)}</Text>
                       {session.calories > 0 && (

@@ -25,6 +25,26 @@ const CLASSIC_SYM_DIFF = 30;
 const SMOOTH_WINDOW = 5;
 const CONF_THRESHOLD = 0.3;
 
+// Camera-angle-robustness signal, in the same spirit as squatFsm.ts's HIP_DROP_DOWN, but a
+// genuinely different geometry: spineLeanAngle/trunk angle only correctly measure the sit-up's
+// lift when the camera views the motion in profile (from the side, roughly perpendicular to
+// the body's length) — a camera positioned at the head/feet (viewing along the body's length,
+// e.g. a "vertical" phone placement propped at the feet) foreshortens the curl the same way a
+// front-facing camera foreshortens a squat's knee angle. Portrait-vs-landscape DEVICE rotation
+// is already handled upstream (WorkoutScreen.tsx normalizes +y = gravity before this FSM ever
+// sees the data) — this is about camera POSITION relative to a lying-down body, which is a
+// different, unhandled axis.
+// The shoulder-to-knee DISTANCE, instead of an angle, is used as the robust alternative: it's
+// a Euclidean distance, so it's inherently invariant to which direction the camera is offset
+// in — it shrinks as the torso curls up regardless of whether that curl is captured face-on
+// (side camera) or foreshortened toward the camera (end-on camera), because either way the
+// shoulder is moving closer to the knee in image space. Self-calibrates to the user's own
+// lying-flat distance the same way HIP_DROP_DOWN self-calibrates to standing leg length.
+// UNLIKE squatFsm/lungeFsm's HIP_DROP_DOWN (reused from a validated value with matching
+// geometry), this is a fresh, untested signal — 0.35 is a starting estimate only, expect to
+// retune after real testing (watch the [SITUP] log below).
+const DIST_SHRINK_DOWN = 0.35;
+
 export type SitupStage = 'UP' | 'DOWN' | null;
 
 export interface SitupFsmState {
@@ -56,6 +76,12 @@ export class SitupFsm {
   private leanSmoothBuffer: number[] = [];
   private trunkSmoothBuffer: number[] = [];
   private lastState: SitupFsmState = INITIAL_SITUP_STATE;
+  // Resting (lying-flat) reference for DIST_SHRINK_DOWN — see the comment above it. Tracks
+  // the LARGEST (most lying-flat) shoulder-to-knee distance seen across the whole set;
+  // deliberately not reset per rep (squatFsm.ts found resetting per rep meant a freshly-wiped
+  // reference had to re-converge from a too-short/noisy window, breaking every rep after the
+  // first one or two).
+  private restingShoulderKneeDist: number | null = null;
 
   reset(): void {
     this.stage = null;
@@ -63,6 +89,7 @@ export class SitupFsm {
     this.score = 0;
     this.leanSmoothBuffer = [];
     this.trunkSmoothBuffer = [];
+    this.restingShoulderKneeDist = null;
     this.lastState = INITIAL_SITUP_STATE;
   }
 
@@ -71,6 +98,7 @@ export class SitupFsm {
     this.stage = null;
     this.leanSmoothBuffer = [];
     this.trunkSmoothBuffer = [];
+    this.restingShoulderKneeDist = null;
   }
 
   /** Feed one frame of MoveNet keypoints (flattened length-51 array). */
@@ -118,32 +146,62 @@ export class SitupFsm {
     const feetOnFloor = kneeBent > KNEE_BENT_MIN && kneeBent < KNEE_BENT_MAX;
     const classicSym = Math.abs(leanL - leanR) < CLASSIC_SYM_DIFF;
 
-    if (smoothLean > LEAN_DOWN_ANGLE) {
+    // Shoulder-to-knee distance and its shrink fraction against the lying-flat reference —
+    // see DIST_SHRINK_DOWN above. Computed BEFORE this frame's reference refresh below, so a
+    // rep-starting frame is measured against where "lying flat" actually was, not itself.
+    const shoulderKneeDist = Math.hypot(shoulderMid.x - kneeMid.x, shoulderMid.y - kneeMid.y);
+    const shrinkFrac =
+      this.restingShoulderKneeDist != null
+        ? 1 - shoulderKneeDist / this.restingShoulderKneeDist
+        : 0;
+
+    const genuinelyDown = smoothLean > LEAN_DOWN_ANGLE;
+    if (genuinelyDown) {
       this.stage = 'DOWN';
     }
-    const classicUp =
-      this.stage === 'DOWN' &&
-      smoothLean < LEAN_UP_ANGLE &&
-      smoothTrunk < TRUNK_UP_ANGLE &&
-      classicSym; // feetOnFloor removed — was misfiring on MoveNet coordinates
-    if (classicUp) {
+
+    // angleTrigger keeps the ORIGINAL Python-prototype-validated behavior unchanged.
+    // distTrigger deliberately does NOT gate on classicSym: it's an L/R symmetry check
+    // computed from the same potentially-distorted spineLeanAngle, so at a camera position
+    // where the angle trigger already fails, it could fail the same way (see squatFsm.ts's
+    // kneeSym reasoning — identical logic applies here).
+    const angleTrigger = smoothLean < LEAN_UP_ANGLE && smoothTrunk < TRUNK_UP_ANGLE && classicSym;
+    const distTrigger = shrinkFrac > DIST_SHRINK_DOWN;
+    // Camera-angle-robust "good" signals, reused below for score/feedback/status — mirrors
+    // squatFsm.ts's goodDepth for the same reason (a rep could count via distTrigger yet still
+    // score/display as not-quite-there if only the raw angle threshold were checked here).
+    const goodPerfect = smoothLean < LEAN_PERFECT || distTrigger;
+    const goodGreat = smoothLean < LEAN_GREAT || distTrigger;
+    if (this.stage === 'DOWN' && (angleTrigger || distTrigger)) {
       this.counter += 1;
-      this.score += smoothLean < LEAN_PERFECT ? 10 : 5;
+      this.score += goodPerfect ? 10 : 5;
       this.stage = 'UP';
+    }
+
+    // Track the LARGEST (most lying-flat) shoulderKneeDist seen across the whole set —
+    // deliberately not reset per rep. See squatFsm.ts for the full reasoning.
+    if (
+      genuinelyDown &&
+      (this.restingShoulderKneeDist == null || shoulderKneeDist > this.restingShoulderKneeDist)
+    ) {
+      this.restingShoulderKneeDist = shoulderKneeDist;
     }
 
     if (DEBUG_SITUP) {
       console.log(
         `[SITUP] stage=${this.stage ?? 'null'} counter=${this.counter} ` +
         `lean=${smoothLean.toFixed(1)}° trunk=${smoothTrunk.toFixed(1)}° ` +
-        `kneeBent=${kneeBent.toFixed(1)}° feetOnFloor=${feetOnFloor} classicSym=${classicSym}`
+        `shoulderKneeDist=${shoulderKneeDist.toFixed(3)} restingDist=${this.restingShoulderKneeDist?.toFixed(3) ?? 'null'} ` +
+        `shrinkFrac=${shrinkFrac.toFixed(3)}(>${DIST_SHRINK_DOWN}) ` +
+        `kneeBent=${kneeBent.toFixed(1)}° feetOnFloor=${feetOnFloor} classicSym=${classicSym} ` +
+        `angleTrigger=${angleTrigger} distTrigger=${distTrigger}`
       );
     }
 
     let feedback: string;
     if (smoothLean > LEAN_DOWN_ANGLE) {
       feedback = 'Sit Up';
-    } else if (smoothLean < LEAN_GREAT) {
+    } else if (goodGreat) {
       feedback = 'Great - lower with control';
     } else if (this.stage === 'UP') {
       feedback = 'Lower back down';
@@ -154,7 +212,7 @@ export class SitupFsm {
     let status: 'good' | 'adjust' | 'error' | 'guide';
     if (this.stage === null) {
       status = 'guide';
-    } else if (smoothLean < LEAN_GREAT) {
+    } else if (goodGreat) {
       status = 'good';
     } else {
       status = 'adjust';

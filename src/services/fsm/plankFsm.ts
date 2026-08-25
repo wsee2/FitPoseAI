@@ -27,8 +27,34 @@ const BODY_STRAIGHT_ANGLE = 152;
 const BODY_LEVEL_DIFF = 0.14;
 const SEVERE_BODY_ANGLE = 138;
 const SMOOTH_WINDOW = 5;
-const CONF_THRESHOLD = 0.3;
+// Lowered 0.3→0.15, plankFsm-only (each FSM defines its own CONF_THRESHOLD; squat/lunge/
+// pushup/situp are unaffected). Confirmed on-device across two separate sessions at the
+// same camera placement that confidence for shoulder/hip/ankle (already trimmed down to
+// the minimum required set — see below) is chronically marginal: session 1 had wrist/elbow
+// as the bottleneck with shoulder/hip/ankle fine; session 2 had shoulder as the bottleneck
+// (0.06-0.36) with hip/ankle fine. Different keypoint each time, hip the one consistently
+// reliable point across both — this isn't one fixable weak joint, it's generally marginal
+// tracking at this placement where whichever point is worst on a given frame becomes the
+// bottleneck. 0.15 still rejects the most extreme values (0.04-0.09, likely genuine
+// hallucination) while accepting the 0.16-0.29 range that was the dominant failure mode.
+const CONF_THRESHOLD = 0.15;
 const PLANK_GRACE = 10;
+
+// REVERTED: tried self-calibrating BODY_STRAIGHT_ANGLE the same way squatFsm.ts
+// self-calibrates HIP_DROP_DOWN (track the best bodyAngle seen, require staying within a
+// tolerance of it). Confirmed on-device this does NOT work for plank, for a more
+// fundamental reason than a cold-start bug: at floor-level camera height viewing a
+// floor-level horizontal body, bodyAngle drifted 30°+ (143°→175°) during a single STATIC
+// hold with no real form change — and a deliberately-bad (hips raised) attempt read the
+// SAME ~143-147° as a genuinely correct one at this placement. When good and bad form
+// produce indistinguishable readings, no threshold — fixed or calibrated — can separate
+// them; calibrating just made it worse by chasing whatever the noisy value happened to be
+// (falsely approving the bad start, then freezing a correct hold once it calibrated too
+// strict). Back to the fixed threshold: safe (never praises obviously bad form) even
+// though it means bodyAngle-based straightness genuinely doesn't work at extreme
+// floor-level camera placements — that needs a camera reposition (angle it up slightly),
+// not a software fix, since the hip-sag/pike motion is nearly parallel to the camera's own
+// line of sight there and there's little real signal left to threshold on.
 
 export interface PlankFsmState {
   holdSeconds: number;
@@ -94,12 +120,48 @@ export class PlankFsm {
     const ankleL = getKeypoint(keypoints, LEFT_ANKLE);
     const ankleR = getKeypoint(keypoints, RIGHT_ANKLE);
 
-    const required = [
-      shoulderL, shoulderR, elbowL, elbowR, wristL, wristR,
-      hipL, hipR, kneeL, kneeR, ankleL, ankleR,
-    ];
+    // Knees AND elbows/wrists excluded from required. Knees: legAngle is debug-log-only (see
+    // the comment below). Elbows/wrists: confirmed on-device that requiring their confidence
+    // made plank essentially unusable — an entire real session logged near-100% low-confidence
+    // frames, dominated by chronic wrist confidence (often 0.04-0.16) even with the whole body
+    // clearly framed. MoveNet Lightning's wrist/elbow keypoints are its structurally weakest,
+    // and a plank's near-vertical forearm (hand under shoulder) is an awkward, easily
+    // foreshortened/self-occluded configuration for them specifically — this looks like an
+    // inherent model limitation for this pose, not a fixable camera or threshold issue.
+    // torsoElevated (the one check that uses elbow/wrist) now runs on best-effort coordinates
+    // regardless of confidence — noisier, but processing a noisy frame beats freezing on every
+    // frame. Only shoulder/hip/ankle (what bodyAngle/bodyLevel actually need, and what tracks
+    // reliably per the same log — hip in particular stayed 0.5-0.85 throughout) still gate.
+    const required = [shoulderL, shoulderR, hipL, hipR, ankleL, ankleR];
     if (required.some((p) => p.conf < CONF_THRESHOLD)) {
-      // Low-confidence frame (e.g. body partially out of view) — don't miscount, just hold.
+      // Low-confidence frame (e.g. body partially out of view). Confirmed on-device this
+      // could previously freeze the display for a long stretch: silently returning
+      // lastState unchanged meant a stale "good"/green status (and a stale hold timer)
+      // kept being redisplayed indefinitely, through form changes the FSM never actually
+      // re-evaluated because it never got a confident-enough frame to do so. Finalize any
+      // in-progress hold instead (same pattern as pauseForChat, so a later confident frame
+      // doesn't retroactively count the untracked gap as held time) and report an honest
+      // "not currently tracked" state.
+      if (DEBUG_PLANK) {
+        console.log(
+          `[PLANK] LOW-CONFIDENCE FRAME, pausing — ` +
+          `shoulderL=${shoulderL.conf.toFixed(2)} shoulderR=${shoulderR.conf.toFixed(2)} ` +
+          `hipL=${hipL.conf.toFixed(2)} hipR=${hipR.conf.toFixed(2)} ` +
+          `ankleL=${ankleL.conf.toFixed(2)} ankleR=${ankleR.conf.toFixed(2)}`
+        );
+      }
+      if (this.plankStartTime !== null) {
+        this.plankHoldTime += Date.now() / 1000 - this.plankStartTime;
+        this.plankStartTime = null;
+      }
+      this.plankBadFrames = 0;
+      this.lastState = {
+        ...this.lastState,
+        isHolding: false,
+        holdSeconds: Math.floor(this.plankHoldTime),
+        feedback: "Can't see you clearly - adjust position",
+        status: 'guide',
+      };
       return this.lastState;
     }
 
@@ -114,6 +176,8 @@ export class PlankFsm {
       this.bodySmoothBuffer.reduce((sum, v) => sum + v, 0) / this.bodySmoothBuffer.length;
 
     const hDiff = Math.abs(shoulderMid.y - hipMid.y);
+    // elbow/wrist confidence is no longer required (see above) — these run on best-effort
+    // coordinates, which can be noisier than the required shoulder/hip/ankle points.
     const elbowMidY = (elbowL.y + elbowR.y) / 2;
     const wristMidY = (wristL.y + wristR.y) / 2;
     const supportY = Math.max(elbowMidY, wristMidY);
@@ -130,15 +194,44 @@ export class PlankFsm {
       calculateAngle(hipL, kneeL, ankleL),
       calculateAngle(hipR, kneeR, ankleR)
     );
+    // legAngle kept for the debug log only — NOT used to gate goodPlank/hold anymore.
+    // Confirmed on-device: at this exact horizontal-floor placement, legAngle swung from
+    // ~155-165° (genuinely straight) to ~95-104° within 2-3 frames while hip/ankle Y in the
+    // raw [POSE] log were themselves jumping erratically — that's pose-tracking instability,
+    // not a smooth camera-angle bias, so no tolerance window could absorb a swing that size
+    // without also accepting a truly bent-knee plank. This is a continuation of this file's
+    // existing precedent (see the
+    // LEGS_STRAIGHT_ANGLE/severeBad comments above) of not letting noisy knee coords block
+    // the hold — just taken one step further, since the grace window alone wasn't enough
+    // for a *sustained* bad streak rather than a brief blip.
     const legsStraight = legAngle > LEGS_STRAIGHT_ANGLE;
-
-    const bodyStraight = bodyAngle > BODY_STRAIGHT_ANGLE;
     const bodyLevel = hDiff < BODY_LEVEL_DIFF;
-    const goodPlank = bodyStraight && bodyLevel && torsoElevated && legsStraight;
-    // !legsStraight removed from severeBad: MoveNet knee noise must not instantly freeze the timer.
-    // Bent-leg frames now consume the PLANK_GRACE window instead of triggering immediate pause.
-    const severeBad =
-      !torsoElevated || bodyAngle < SEVERE_BODY_ANGLE || !bodyLevel;
+
+    // bodyAngle/bodyStraight kept for the debug log only — NOT used to gate goodPlank/
+    // severeBad anymore. Confirmed on-device across three separate placements (two
+    // horizontal-floor sessions, one horizontal-table session) that this signal cannot
+    // discriminate plank straightness at floor/table-adjacent camera heights: a genuinely
+    // correct plank and a deliberately-bad (hips raised) one produced the SAME ~143-147°
+    // reading in one test, and a real, stably-tracked plank read 123-141° against the fixed
+    // 152° threshold in another — while self-calibrating against it (tried and reverted,
+    // see above) only made things worse by chasing whatever the noisy value happened to be.
+    // At these camera heights the hip-sag/pike motion this angle is meant to catch is
+    // nearly parallel to the camera's own line of sight, so there just isn't reliable signal
+    // left to threshold on — fixed or calibrated. torsoElevated/bodyLevel are both
+    // position-based and have held up reliably across every test, so they're now the sole
+    // gate: the tradeoff is losing sag/pike detection specifically at these placements, in
+    // exchange for the hold timer actually working.
+    const bodyStraight = bodyAngle > BODY_STRAIGHT_ANGLE;
+    const goodPlank = bodyLevel && torsoElevated;
+    // severeBad used to have a buffer below goodPlank's threshold (bodyAngle < a MUCH lower
+    // SEVERE_BODY_ANGLE) so a brief, noisy near-miss consumed the PLANK_GRACE window instead
+    // of instantly freezing. With bodyAngle removed, severeBad = !goodPlank exactly would
+    // silently delete that buffer — any single noisy torsoElevated/bodyLevel frame would
+    // freeze immediately. Restore the buffer on hDiff (continuous, and the more noise-prone
+    // of the two remaining checks): only a hDiff blowout well past BODY_LEVEL_DIFF (as seen
+    // during genuine tracking breakdown, e.g. hDiff=0.25-0.33 in a confirmed bad stretch)
+    // triggers an immediate freeze; a borderline miss still gets the grace window.
+    const severeBad = !torsoElevated || hDiff > BODY_LEVEL_DIFF * 2;
 
     const neverStarted = this.plankHoldTime === 0 && this.plankStartTime === null;
 
@@ -169,8 +262,6 @@ export class PlankFsm {
       const whyNot = !goodPlank
         ? ([
             !torsoElevated ? 'torsoElev' : null,
-            !legsStraight  ? `legsStraight(${legAngle.toFixed(1)}°)` : null,
-            !bodyStraight  ? 'bodyStraight' : null,
             !bodyLevel     ? 'bodyLevel' : null,
           ] as (string | null)[]).filter(Boolean).join('+')
         : '';
@@ -186,22 +277,10 @@ export class PlankFsm {
     let feedback: string;
     if (goodPlank) {
       feedback = 'Hold the plank';
-    } else if (severeBad) {
-      if (!torsoElevated) {
-        feedback = 'Lift up - off the floor';
-      } else if (!bodyLevel) {
-        feedback = 'Keep body horizontal';
-      } else {
-        feedback = 'No sag - body straight';
-      }
-    } else if (!legsStraight) {
-      feedback = 'Straighten legs';
-    } else if (!bodyLevel) {
-      feedback = 'Keep body horizontal';
-    } else if (!bodyStraight) {
-      feedback = 'No sag - body straight';
+    } else if (!torsoElevated) {
+      feedback = 'Lift up - off the floor';
     } else {
-      feedback = 'Hold the plank';
+      feedback = 'Keep body horizontal';
     }
 
     let status: 'good' | 'adjust' | 'error' | 'guide';

@@ -18,8 +18,13 @@ export async function loadSessions(uid: string): Promise<WorkoutSession[]> {
   try {
     const snap = await get(ref(database, `users/${uid}/sessions`));
     if (!snap.exists()) return [];
+    // Sort by `id` (Date.now().toString() at session creation — see WorkoutScreen/AppContext),
+    // not by `date` alone: `date` is a "YYYY-MM-DD" day, so two sessions on the same day used
+    // to tie under a date-only comparator, leaving their relative order to depend on
+    // incidental object-key iteration order rather than an explicit time comparison. `id` is
+    // an exact millisecond timestamp, so this sorts correctly both across days and within one.
     return (Object.values(snap.val() as Record<string, WorkoutSession>) as WorkoutSession[]).sort(
-      (a, b) => (b.date ?? '').localeCompare(a.date ?? '')
+      (a, b) => Number(b.id) - Number(a.id)
     );
   } catch (err) {
     console.warn('loadSessions failed:', err);

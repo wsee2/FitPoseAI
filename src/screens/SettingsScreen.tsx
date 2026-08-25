@@ -1,8 +1,11 @@
 import React, { useState } from 'react';
 import { setEnabled as ttsSetEnabled } from '../services/ttsService';
+import { setEnabled as hapticsSetEnabled } from '../services/hapticsService';
+import { syncReminderState } from '../services/notificationsService';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert, TextInput,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert, TextInput, Linking,
 } from 'react-native';
+import { useCameraPermission } from 'react-native-vision-camera';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -32,28 +35,26 @@ const GOAL_OPTIONS = [
   { id: 'flexibility',       label: 'Flexibility',          emoji: '🤸' },
 ];
 
-const LEVEL_OPTIONS = [
-  { id: 'beginner',     label: 'Beginner',     emoji: '🌱' },
-  { id: 'intermediate', label: 'Intermediate', emoji: '🔥' },
-  { id: 'advanced',     label: 'Advanced',     emoji: '⚡' },
-];
-
-const AVATAR_OPTIONS = [
-  { id: 'male_athletic', label: 'Athletic Male', emoji: '🏋️‍♂️' },
-  { id: 'female_athletic', label: 'Athletic Female', emoji: '🏋️‍♀️' },
-  { id: 'male_casual', label: 'Casual Male', emoji: '👨' },
-  { id: 'female_casual', label: 'Casual Female', emoji: '👩' },
-];
-
 const VOICE_OPTIONS = [
-  { id: 'energetic_male', label: 'Energetic Male', desc: 'High energy, motivational' },
-  { id: 'calm_male', label: 'Calm Male', desc: 'Steady, professional' },
-  { id: 'energetic_female', label: 'Energetic Female', desc: 'High energy, encouraging' },
-  { id: 'calm_female', label: 'Calm Female', desc: 'Calm, supportive' },
+  { id: 'male', label: 'Male', desc: 'Male coaching voice' },
+  { id: 'female', label: 'Female', desc: 'Female coaching voice' },
 ];
 
 export default function SettingsScreen({ navigation }: Props) {
   const { profile, updateProfile, authUser, signOutUser } = useApp();
+  const { hasPermission: hasCameraPermission } = useCameraPermission();
+
+  // The app can only ever REQUEST camera permission once via the in-app dialog — on iOS a
+  // single denial permanently blocks further in-app re-prompts, and Android behaves the same
+  // once "don't ask again" is set. Deep-linking to the OS app-settings page is the only
+  // action that reliably works to grant OR revoke it regardless of that history, so this row
+  // always opens system settings rather than trying to guess which platform-specific
+  // in-app-prompt-vs-settings-page path applies to the current state.
+  const handleCameraAccess = () => {
+    Linking.openSettings().catch(() => {
+      Alert.alert('Unable to open settings', 'Please open your device Settings app and grant camera access to FitPose AI manually.');
+    });
+  };
 
   const handleLogout = () => {
     Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
@@ -69,17 +70,34 @@ export default function SettingsScreen({ navigation }: Props) {
       },
     ]);
   };
+
+  // Turning reminders ON needs an immediate permission check (not just persisting the
+  // preference) so a denial is reported to the user right here, rather than the toggle
+  // silently snapping back off later via AppContext's background sync effect with no
+  // explanation. Turning OFF just cancels the scheduled notification and persists.
+  const handleToggleReminders = async (wantsOn: boolean) => {
+    if (wantsOn) {
+      const granted = await syncReminderState(true);
+      if (!granted) {
+        Alert.alert(
+          'Notifications disabled',
+          'FitPose needs notification permission to send workout reminders. Enable it for FitPose in your device Settings, then try again.'
+        );
+        return;
+      }
+    } else {
+      await syncReminderState(false);
+    }
+    updateProfile({ notificationsEnabled: wantsOn });
+  };
+
   const insets = useSafeAreaInsets();
   const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [notifications, setNotifications] = useState(true);
   const [haptics, setHaptics] = useState(true);
-  const [autoSave, setAutoSave] = useState(true);
-  const [showAvatarPicker, setShowAvatarPicker] = useState(false);
   const [showVoicePicker, setShowVoicePicker] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameValue, setNameValue] = useState('');
   const [showGoalPicker, setShowGoalPicker] = useState(false);
-  const [showLevelPicker, setShowLevelPicker] = useState(false);
 
   const goalLabels: Record<string, string> = {
     lose_weight: 'Lose Weight',
@@ -107,34 +125,37 @@ export default function SettingsScreen({ navigation }: Props) {
       rows: [
         { id: 'name', label: 'Name', subtitle: profile?.name ?? '—', icon: '👤', type: 'nav', onPress: () => { setNameValue(profile?.name ?? ''); setEditingName(!editingName); } },
         { id: 'goal', label: 'Fitness Goal', subtitle: profile?.goal ? goalLabels[profile.goal] : '—', icon: '🎯', type: 'nav', onPress: () => setShowGoalPicker(!showGoalPicker) },
-        { id: 'level', label: 'Experience Level', subtitle: profile?.level ? levelLabels[profile.level] : '—', icon: '📊', type: 'nav', onPress: () => setShowLevelPicker(!showLevelPicker) },
+        // Not user-editable: level is earned automatically from in-app training history
+        // (see computeEligibleLevel / AppContext's auto-upgrade effect), never self-reported
+        // after onboarding, so a manual override here couldn't silently invalidate it.
+        // type: 'value' (not 'nav') is what actually removes the chevron/tap handler — see
+        // the row renderer below, which disables touch and drops onPress for this type.
+        { id: 'level', label: 'Experience Level', subtitle: profile?.level ? levelLabels[profile.level] : '—', icon: '📊', type: 'value' },
       ],
     },
     {
-      title: 'AI Coach Avatar',
+      title: 'AI Coach',
       rows: [
-        { id: 'avatar', label: 'Avatar Style', subtitle: AVATAR_OPTIONS.find(a => a.id === profile?.avatar)?.label ?? 'Athletic Male', icon: '🤖', type: 'nav', onPress: () => setShowAvatarPicker(!showAvatarPicker) },
-        { id: 'voice', label: 'Voice Type', subtitle: VOICE_OPTIONS.find(v => v.id === profile?.voice)?.label ?? 'Energetic Male', icon: '🎙️', type: 'nav', onPress: () => setShowVoicePicker(!showVoicePicker) },
+        { id: 'voice', label: 'Voice Type', subtitle: VOICE_OPTIONS.find(v => v.id === profile?.voice)?.label ?? 'Male', icon: '🎙️', type: 'nav', onPress: () => setShowVoicePicker(!showVoicePicker) },
       ],
     },
     {
       title: 'Audio & Haptics',
       rows: [
         { id: 'voice_coaching', label: 'Voice Coaching', subtitle: 'AI coach feedback during workouts', icon: '🔊', type: 'toggle', value: voiceEnabled, onToggle: (v: boolean) => { setVoiceEnabled(v); ttsSetEnabled(v); } },
-        { id: 'haptics_setting', label: 'Haptic Feedback', subtitle: 'Vibration on reps and feedback', icon: '📳', type: 'toggle', value: haptics, onToggle: setHaptics },
+        { id: 'haptics_setting', label: 'Haptic Feedback', subtitle: 'Vibration on reps and feedback', icon: '📳', type: 'toggle', value: haptics, onToggle: (v: boolean) => { setHaptics(v); hapticsSetEnabled(v); } },
       ],
     },
     {
       title: 'Notifications',
       rows: [
-        { id: 'notifs', label: 'Workout Reminders', subtitle: 'Daily reminder to stay consistent', icon: '🔔', type: 'toggle', value: notifications, onToggle: setNotifications },
-        { id: 'auto_save', label: 'Auto-Save Sessions', subtitle: 'Sync workouts to cloud', icon: '☁️', type: 'toggle', value: autoSave, onToggle: setAutoSave },
+        { id: 'notifs', label: 'Workout Reminders', subtitle: 'Daily reminder to stay consistent', icon: '🔔', type: 'toggle', value: profile?.notificationsEnabled ?? true, onToggle: handleToggleReminders },
       ],
     },
     {
       title: 'Privacy',
       rows: [
-        { id: 'camera', label: 'Camera Access', subtitle: 'Required for pose detection', icon: '📷', type: 'nav', onPress: () => {} },
+        { id: 'camera', label: 'Camera Access', subtitle: hasCameraPermission ? 'Granted — tap to review in Settings' : 'Not granted — tap to enable in Settings', icon: '📷', type: 'nav', onPress: handleCameraAccess },
       ],
     },
     {
@@ -218,23 +239,6 @@ export default function SettingsScreen({ navigation }: Props) {
                   </TouchableOpacity>
                   {idx < section.rows.length - 1 && <View style={styles.divider} />}
 
-                  {/* Avatar picker */}
-                  {row.id === 'avatar' && showAvatarPicker && (
-                    <View style={styles.picker}>
-                      {AVATAR_OPTIONS.map((opt) => (
-                        <TouchableOpacity
-                          key={opt.id}
-                          style={[styles.pickerOption, profile?.avatar === opt.id && styles.pickerOptionActive]}
-                          onPress={() => { updateProfile({ avatar: opt.id as any }); setShowAvatarPicker(false); }}
-                        >
-                          <Text style={styles.pickerEmoji}>{opt.emoji}</Text>
-                          <Text style={[styles.pickerLabel, profile?.avatar === opt.id && { color: Colors.cyan }]}>{opt.label}</Text>
-                          {profile?.avatar === opt.id && <Text style={styles.pickerCheck}>✓</Text>}
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  )}
-
                   {/* Voice picker */}
                   {row.id === 'voice' && showVoicePicker && (
                     <View style={styles.picker}>
@@ -294,22 +298,6 @@ export default function SettingsScreen({ navigation }: Props) {
                     </View>
                   )}
 
-                  {/* Level picker */}
-                  {row.id === 'level' && showLevelPicker && (
-                    <View style={styles.picker}>
-                      {LEVEL_OPTIONS.map((opt) => (
-                        <TouchableOpacity
-                          key={opt.id}
-                          style={[styles.pickerOption, profile?.level === opt.id && styles.pickerOptionActive]}
-                          onPress={() => { updateProfile({ level: opt.id as any }); setShowLevelPicker(false); }}
-                        >
-                          <Text style={styles.pickerEmoji}>{opt.emoji}</Text>
-                          <Text style={[styles.pickerLabel, profile?.level === opt.id && { color: Colors.cyan }]}>{opt.label}</Text>
-                          {profile?.level === opt.id && <Text style={styles.pickerCheck}>✓</Text>}
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  )}
                 </React.Fragment>
               ))}
             </View>

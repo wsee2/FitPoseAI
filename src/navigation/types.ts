@@ -28,7 +28,13 @@ export type VideoStackParamList = {
 export type HomeStackParamList = {
   Home: undefined;
   ExerciseSelect: undefined;
-  Workout: { exerciseId: ExerciseId };
+  // Both ExerciseSelectScreen's Start and HomeScreen's quick-start pill route through here
+  // now — WorkoutSetupScreen owns per-set target + sets-per-session, so Workout itself
+  // always receives them explicitly (target/sets below stay optional only as a defensive
+  // fallback, e.g. deep-linking straight to Workout — see WorkoutScreen's
+  // getDefaultTarget/DEFAULT_SETS fallback).
+  WorkoutSetup: { exerciseId: ExerciseId };
+  Workout: { exerciseId: ExerciseId; target?: number; sets?: number };
   SessionSummary: { sessionId: string };
   // VideoAnalysis hidden — feature deprioritised, see report future work.
   // VideoAnalysis: { exerciseId?: ExerciseId };
@@ -54,6 +60,7 @@ export type HomeScreenNavigationProp = CompositeNavigationProp<
 >;
 
 export type ExerciseSelectNavigationProp = NativeStackNavigationProp<HomeStackParamList, 'ExerciseSelect'>;
+export type WorkoutSetupNavigationProp = NativeStackNavigationProp<HomeStackParamList, 'WorkoutSetup'>;
 export type WorkoutNavigationProp = NativeStackNavigationProp<HomeStackParamList, 'Workout'>;
 export type SessionSummaryNavigationProp = NativeStackNavigationProp<HomeStackParamList, 'SessionSummary'>;
 export type AnalyticsNavigationProp = NativeStackNavigationProp<AnalyticsStackParamList, 'Analytics'>;

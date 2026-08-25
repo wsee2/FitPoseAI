@@ -97,11 +97,12 @@ export default function AICoachScreen({ navigation }: Props) {
   // Capture initial values so the mount effect doesn't need dynamic deps.
   const initialHistoryRef = useRef(workoutHistory);
   const initialCoachMsgRef = useRef(lastCoachMessage);
+  const initialProfileRef = useRef(profile);
   const firstName = profile?.name?.split(' ')[0] ?? 'there';
 
   useEffect(() => {
     // Initialize chat session seeded with user history.
-    chatRef.current = createChatSession(initialHistoryRef.current);
+    chatRef.current = createChatSession(initialHistoryRef.current, null, initialProfileRef.current);
 
     const greeting: Message = {
       id: 'greeting',
@@ -131,7 +132,7 @@ export default function AICoachScreen({ navigation }: Props) {
     setMessages(initial);
 
     // Fetch trend message (rate-limited in the service — won't spam).
-    getTrendMessage(initialHistoryRef.current).then(msg => {
+    getTrendMessage(initialHistoryRef.current, initialProfileRef.current).then(msg => {
       if (!msg) return;
       setMessages(prev => [
         ...prev,

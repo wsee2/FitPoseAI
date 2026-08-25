@@ -20,6 +20,13 @@
           "cameraPermissionText": "FitPose AI requires camera access for posture detection.",
           "enableFrameProcessors": true
         }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#00E5FF"
+        }
       ]
     ],
     "ios": {
@@ -39,7 +46,8 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO"
+        "android.permission.RECORD_AUDIO",
+        "android.permission.POST_NOTIFICATIONS"
       ],
       "package": "com.wensee.fitposeai"
     },

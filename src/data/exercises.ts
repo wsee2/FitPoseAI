@@ -25,6 +25,10 @@ export interface WorkoutSession {
   calories: number;
   formQuality: 'Excellent' | 'Good' | 'Fair' | 'Needs Work';
   source?: 'live' | 'video';
+  // Number of sets actually completed in this session. Optional — absent on any session
+  // saved before multi-set support (or if only a single set was ever run), so consumers
+  // must treat a missing value as "1 set" rather than requiring it.
+  sets?: number;
 }
 
 export const EXERCISES: Record<ExerciseId, Exercise> = {
@@ -162,6 +166,12 @@ export const formatDuration = (seconds: number): string => {
   const s = seconds % 60;
   return `${m}:${s.toString().padStart(2, '0')}`;
 };
+
+// session.reps is overloaded: for plank it's held seconds (see WorkoutScreen's
+// getFinalStats), for every other exercise it's an actual rep count. Mirrors the same
+// distinction aiCoach.ts's buildHistorySummary already makes for the AI coach's context.
+export const formatRepsOrHold = (session: WorkoutSession): string =>
+  session.exerciseId === 'plank' ? `${session.reps}s hold` : `${session.reps} reps`;
 
 export const getScoreGrade = (score: number): { grade: string; color: string } => {
   if (score >= 90) return { grade: 'S', color: '#00E5FF' };

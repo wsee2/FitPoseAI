@@ -30,7 +30,7 @@ export default function ExerciseSelectScreen({ navigation }: Props) {
 
   const handleStart = () => {
     if (selected) {
-      navigation.navigate('Workout', { exerciseId: selected });
+      navigation.navigate('WorkoutSetup', { exerciseId: selected });
     }
   };
 

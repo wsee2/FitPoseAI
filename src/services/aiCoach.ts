@@ -1,4 +1,5 @@
 import type { WorkoutSession } from '../data/exercises';
+import type { ExperienceLevel, FitnessGoal } from '../context/AppContext';
 
 // ---------------------------------------------------------------------------
 // Provider configuration — to swap back to Gemini: replace callLLM() + createChatSession()
@@ -68,6 +69,33 @@ function buildCurrentSessionNote(current: CurrentSessionContext): string {
 }
 
 // ---------------------------------------------------------------------------
+// Profile context — the user's stated goal and experience level (set at onboarding, editable
+// in Settings), fed into every coach interaction so tone, technique depth, and suggestions
+// actually reflect what the user told the app about themselves, per COACH_SYSTEM_PROMPT's
+// own "personalized feedback" / "tailor your workout recommendations" promises.
+export interface CoachProfileContext {
+  goal: FitnessGoal;
+  level: ExperienceLevel;
+}
+
+const GOAL_LABELS: Record<FitnessGoal, string> = {
+  lose_weight: 'losing weight / burning fat',
+  build_muscle: 'building muscle and strength',
+  improve_endurance: 'improving endurance and cardio stamina',
+  flexibility: 'improving flexibility and range of motion',
+};
+
+const LEVEL_LABELS: Record<ExperienceLevel, string> = {
+  beginner: 'a beginner (new to working out)',
+  intermediate: 'intermediate (some training experience)',
+  advanced: 'advanced (experienced athlete)',
+};
+
+function buildProfileNote(profile: CoachProfileContext): string {
+  return `USER PROFILE: Stated goal — ${GOAL_LABELS[profile.goal]}. Experience level — ${LEVEL_LABELS[profile.level]}. Let this shape your suggestions: for a beginner, favor simpler technique cues, easier rep/hold targets, and extra encouragement; for advanced, give more precise technique refinement and push for harder targets. Let the goal shape what you emphasize — e.g. rep-volume/cardio framing for endurance or weight-loss goals, controlled-tempo/strength framing for muscle-building, plank/lunge-heavy stretch-and-mobility framing for flexibility. Never invent workout data you don't have — this profile only informs tone and emphasis, not fabricated stats.`;
+}
+
+// ---------------------------------------------------------------------------
 // Provider abstraction — swap ONLY this function (+ MODEL_NAME + OPENAI_API_KEY) to change provider.
 async function callLLM(messages: ChatMessage[]): Promise<string> {
   const res = await fetch(`${OPENAI_API_BASE}/chat/completions`, {
@@ -134,7 +162,8 @@ function buildHistorySummary(sessions: WorkoutSession[]): string {
  */
 export function createChatSession(
   recentSessions: WorkoutSession[],
-  currentSession?: CurrentSessionContext | null
+  currentSession?: CurrentSessionContext | null,
+  profile?: CoachProfileContext | null
 ): ChatSession | null {
   if (!OPENAI_API_KEY) return null;
   const historySummary = buildHistorySummary(recentSessions);
@@ -142,6 +171,9 @@ export function createChatSession(
     { role: 'system', content: COACH_SYSTEM_PROMPT },
     { role: 'system', content: `USER'S RECENT WORKOUT HISTORY:\n${historySummary}` },
   ];
+  if (profile) {
+    history.push({ role: 'system', content: buildProfileNote(profile) });
+  }
   if (currentSession) {
     history.push({ role: 'system', content: buildCurrentSessionNote(currentSession) });
   }
@@ -195,7 +227,8 @@ export async function sendChatMessage(chat: ChatSession | null, userMessage: str
  */
 export async function getSessionEndMessage(
   session: WorkoutSession,
-  recentSessions: WorkoutSession[]
+  recentSessions: WorkoutSession[],
+  profile?: CoachProfileContext | null
 ): Promise<string | null> {
   if (!OPENAI_API_KEY) return null;
   const key = `session-end:${session.id}`;
@@ -210,6 +243,7 @@ export async function getSessionEndMessage(
 
   const messages: ChatMessage[] = [
     { role: 'system', content: COACH_SYSTEM_PROMPT },
+    ...(profile ? [{ role: 'system' as const, content: buildProfileNote(profile) }] : []),
     {
       role: 'user',
       content: `The user just completed: ${session.exerciseId} — ${metric}, score ${session.score}/100 (${session.formQuality}), duration ${session.duration}s.\nRecent history:\n${historyCtx}\n\nWrite ONE encouraging coaching message (2-3 sentences). Be specific to their score and reps. If score < 80, give one concrete improvement tip. Keep it SHORT and energetic.`,
@@ -229,7 +263,10 @@ export async function getSessionEndMessage(
  * Generate a proactive trend message based on the user's workout history.
  * Rate-limited to once per 24 hours. Call from JS thread only.
  */
-export async function getTrendMessage(sessions: WorkoutSession[]): Promise<string | null> {
+export async function getTrendMessage(
+  sessions: WorkoutSession[],
+  profile?: CoachProfileContext | null
+): Promise<string | null> {
   if (!OPENAI_API_KEY) return null;
   if (sessions.length < 2) return null;
   if (!canFire('trend')) return null;
@@ -238,6 +275,7 @@ export async function getTrendMessage(sessions: WorkoutSession[]): Promise<strin
   const summary = buildHistorySummary(sessions);
   const messages: ChatMessage[] = [
     { role: 'system', content: COACH_SYSTEM_PROMPT },
+    ...(profile ? [{ role: 'system' as const, content: buildProfileNote(profile) }] : []),
     {
       role: 'user',
       content: `Based on this user's recent workout history, write ONE brief proactive coaching observation (1-2 sentences). Look for clear trends: improving/declining scores, consistency, exercise variety, or form issues. Only mention a trend if clearly visible in the data. Be encouraging and actionable.\n\nHistory:\n${summary}`,
@@ -249,6 +287,38 @@ export async function getTrendMessage(sessions: WorkoutSession[]): Promise<strin
   } catch (err: any) {
     console.warn('[aiCoach] getTrendMessage RAW | status:', err?.status, '| msg:', String(err?.message ?? err));
     try { console.warn('[aiCoach] getTrendMessage FULL:', JSON.stringify(err)); } catch {}
+    return null;
+  }
+}
+
+/**
+ * Generate a proactive congratulatory message when the user's experience level auto-upgrades
+ * (see computeEligibleLevel in utils/experienceLevel.ts — driven by in-app training tenure,
+ * not self-report). Rate-limited per target level so a render race can't double-fire it.
+ * Call from JS thread only.
+ */
+export async function getLevelUpMessage(
+  newLevel: ExperienceLevel,
+  goal: FitnessGoal
+): Promise<string | null> {
+  if (!OPENAI_API_KEY) return null;
+  const key = `level-up:${newLevel}`;
+  if (!canFire(key)) return null;
+  markFired(key);
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: COACH_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: `The user has just been automatically upgraded to **${LEVEL_LABELS[newLevel]}**, based on their sustained training history in this app (this is earned from real usage, not a self-report). Their stated goal is ${GOAL_LABELS[goal]}. Write ONE short, energetic congratulatory message (2-3 sentences) celebrating this milestone, and give one concrete way their training focus should shift now that they're at this level, tied to their goal.`,
+    },
+  ];
+
+  try {
+    return await withRetry(() => callLLM(messages));
+  } catch (err: any) {
+    console.warn('[aiCoach] getLevelUpMessage RAW | status:', err?.status, '| msg:', String(err?.message ?? err));
+    try { console.warn('[aiCoach] getLevelUpMessage FULL:', JSON.stringify(err)); } catch {}
     return null;
   }
 }
