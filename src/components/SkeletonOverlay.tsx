@@ -106,7 +106,16 @@ interface Props {
   status: SkeletonStatus;
 }
 
-export default function SkeletonOverlay({ keypoints, width, height, status }: Props) {
+// Memoized — WorkoutScreen re-renders on every active-phase frame (setSquatState/
+// setPushupState/etc., which the rep counter/feedback text genuinely need every frame), but
+// that shouldn't force this ~30-element SVG tree to re-reconcile too: `keypoints` is a stable
+// SharedValue reference (its VALUE updates on the UI thread via reanimated, not through
+// re-renders), and width/height/status only actually change occasionally. Without memo, every
+// frame's re-render still cost real JS-thread time here, delaying how soon the thread was
+// free for the NEXT frame's keypoint bridge call — same congestion mechanism documented in
+// WorkoutScreen.tsx's updateKeypoints, just from a different (load-bearing, non-throttleable)
+// state update.
+function SkeletonOverlay({ keypoints, width, height, status }: Props) {
   const color = STATUS_COLORS[status];
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
@@ -136,3 +145,5 @@ export default function SkeletonOverlay({ keypoints, width, height, status }: Pr
     </View>
   );
 }
+
+export default React.memo(SkeletonOverlay);

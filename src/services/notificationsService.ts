@@ -5,7 +5,7 @@ const CHANNEL_ID = 'workout-reminders';
 const REMINDER_ID = 'daily-workout-reminder';
 // Fixed default time — not user-configurable yet. A "pick your own time" picker in Settings
 // would be a reasonable follow-up, but wasn't part of what was asked here.
-const REMINDER_HOUR = 19; // 7:00 PM local device time
+const REMINDER_HOUR = 22; // 7:00 PM local device time
 const REMINDER_MINUTE = 0;
 
 // Shows the reminder as a banner even if the app happens to be in the foreground when it

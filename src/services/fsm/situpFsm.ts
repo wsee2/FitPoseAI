@@ -1,6 +1,5 @@
 import { calculateAngle, getKeypoint, spineLeanAngle, type Keypoint } from '../poseMath';
-
-const DEBUG_SITUP = true;
+import { DEBUG_LOGS as DEBUG_SITUP, shouldLogFsmFrame } from '../../utils/debugFlags';
 
 // MoveNet (COCO-17) keypoint indices used by this FSM.
 const LEFT_SHOULDER = 5;
@@ -187,7 +186,7 @@ export class SitupFsm {
       this.restingShoulderKneeDist = shoulderKneeDist;
     }
 
-    if (DEBUG_SITUP) {
+    if (DEBUG_SITUP && shouldLogFsmFrame()) {
       console.log(
         `[SITUP] stage=${this.stage ?? 'null'} counter=${this.counter} ` +
         `lean=${smoothLean.toFixed(1)}° trunk=${smoothTrunk.toFixed(1)}° ` +

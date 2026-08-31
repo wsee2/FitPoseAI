@@ -133,6 +133,24 @@ export default function SessionSummaryScreen({ navigation, route }: Props) {
             ))}
           </Animated.View>
 
+          {/* Per-set breakdown — only for genuine multi-set sessions; old/1-set sessions have
+              no setDetails and simply skip this section, showing just the stats grid above. */}
+          {session.setDetails && session.setDetails.length > 1 && (
+            <View style={styles.setDetailsSection}>
+              <Text style={styles.setDetailsTitle}>Per-Set Breakdown</Text>
+              <View style={styles.setDetailsRow}>
+                {session.setDetails.map((value, i) => (
+                  <View key={i} style={styles.setDetailChip}>
+                    <Text style={styles.setDetailChipLabel}>SET {i + 1}</Text>
+                    <Text style={[styles.setDetailChipValue, { color: exercise.accentColor }]}>
+                      {session.exerciseId === 'plank' ? formatDuration(value) : value}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
           {/* Badges */}
           {earnedBadges.length > 0 && (
             <View style={styles.badgesSection}>
@@ -232,6 +250,15 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 24, fontWeight: '900', letterSpacing: -0.5 },
   statUnit: { fontSize: 11, color: Colors.textMuted, marginTop: -2 },
   statLabel: { fontSize: 11, color: Colors.textMuted, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase' },
+  setDetailsSection: { marginBottom: 24 },
+  setDetailsTitle: { fontSize: 16, fontWeight: '800', color: Colors.textPrimary, marginBottom: 12 },
+  setDetailsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  setDetailChip: {
+    minWidth: 64, alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10,
+    borderRadius: BorderRadius.lg, backgroundColor: Colors.card, borderWidth: 1, borderColor: Colors.border,
+  },
+  setDetailChipLabel: { fontSize: 10, fontWeight: '700', color: Colors.textMuted, letterSpacing: 0.5, marginBottom: 4 },
+  setDetailChipValue: { fontSize: 16, fontWeight: '800' },
   badgesSection: { marginBottom: 24 },
   badgesTitle: { fontSize: 16, fontWeight: '800', color: Colors.textPrimary, marginBottom: 12 },
   badgesRow: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },

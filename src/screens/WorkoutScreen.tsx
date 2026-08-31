@@ -33,6 +33,7 @@ import { speakFeedback, speakImmediate, reset as ttsReset } from '../services/tt
 import { pulseRep } from '../services/hapticsService';
 import { EncouragementEngine } from '../services/encouragementService';
 import { getDefaultTarget, DEFAULT_SETS } from '../utils/workoutTarget';
+import { DEBUG_LOGS, PERF_HUD_ENABLED, DEBUG_LOG_INTERVAL_MS } from '../utils/debugFlags';
 import { INITIAL_SQUAT_STATE, SquatFsm, type SquatFsmState } from '../services/fsm/squatFsm';
 import { INITIAL_PUSHUP_STATE, PushupFsm, type PushupFsmState } from '../services/fsm/pushupFsm';
 import { INITIAL_LUNGE_STATE, LungeFsm, type LungeFsmState } from '../services/fsm/lungeFsm';
@@ -75,8 +76,34 @@ const INFER_EVERY_N_FRAMES = 1;
 // to or larger than that interval, each tween gets re-targeted before finishing, so the overlay
 // perpetually trails the real position. Keep it comfortably below the inter-frame interval.
 // Raise it (e.g. toward 30-40) if the skeleton looks jittery; lower it (e.g. toward 8-12) if it
-// still looks laggy.
-const SMOOTHING_MS = 16;
+// still looks laggy. Lowered 16→10→8 per that guidance (confirmed laggy on-device, then
+// confirmed improved but still wanted faster) — 8 is the bottom of the documented safe range,
+// below which jitter risk starts outweighing the lag reduction. Note this only shortens the
+// display's catch-up tween once a new detection arrives; it can't remove the underlying
+// ~30-40ms inference latency itself (see PERF HUD/[PERF] logs) — see updateKeypoints's
+// setKeypoints/setInferenceMs/setResizeMs throttling and SkeletonOverlay's React.memo for the
+// other (JS-thread-congestion) half of this investigation.
+const SMOOTHING_MS = 8;
+
+// Motion prediction — extrapolates each keypoint forward by this many ms, using its velocity
+// since the previous frame, before handing it to the SMOOTHING_MS tween. Compensates for the
+// inference+resize+bridge time that's already elapsed by the time a detection reaches the
+// screen (now ~15-25ms with the GPU delegate — see moveNet.ts), so the display shows a
+// predicted "now" position instead of an already-slightly-stale one. Display-only: never
+// touches fsmKp, so rep counting is completely unaffected. Set to 0 to disable entirely and
+// fall back to exactly the pre-prediction behavior (raw detection, no extrapolation).
+// UNTESTED — expect to retune on-device: raise it for more lag compensation (more overshoot
+// risk on sudden direction changes), lower it toward 0 if the skeleton looks jittery/wobbly.
+const PREDICTION_LOOKAHEAD_MS = 12;
+// Caps how far any single keypoint can be extrapolated per frame (normalized 0-1 units, so
+// 0.04 = 4% of frame width/height) — guards against ordinary frame-to-frame keypoint jitter
+// (which looks like a large "velocity" over a very short time delta) being amplified into a
+// visible overshoot/snap.
+const PREDICTION_MAX_DISPLACEMENT = 0.04;
+// If less time than this has passed since the previous frame, skip prediction for this frame
+// (falls back to the raw detection) rather than dividing by a too-small delta and turning tiny
+// position noise into a huge apparent velocity.
+const PREDICTION_MIN_DELTA_MS = 8;
 
 const ROBOT_DEBOUNCE_MS = 800;
 const ROBOT_HAPPY_DURATION_MS = 1500;
@@ -123,7 +150,7 @@ function degreesToResizeRotation(deg: number): '0deg' | '90deg' | '180deg' | '27
   }
 }
 
-const DEBUG = true;
+const DEBUG = DEBUG_LOGS;
 
 // ---------------------------------------------------------------------------
 // Overlay display transform (for skeleton alignment, confirmed working values).
@@ -208,6 +235,34 @@ function applyCoverCropCorrection(kp: number[], contentAspect: number, screenAsp
   return d;
 }
 
+// Motion prediction (DISPLAY ONLY — see PREDICTION_LOOKAHEAD_MS above for the full rationale).
+// Extrapolates each keypoint's y/x forward using its velocity since `previous`, clamped and
+// confidence-gated to avoid amplifying ordinary frame-to-frame jitter into visible overshoot.
+// Runs on `displayKp`, never on `fsmKp` — rep counting always sees the raw, unpredicted
+// detection, completely unaffected by this.
+function predictKeypoints(current: number[], previous: number[] | null, deltaMs: number): number[] {
+  if (PREDICTION_LOOKAHEAD_MS <= 0 || previous === null || deltaMs < PREDICTION_MIN_DELTA_MS) {
+    return current;
+  }
+  const predicted = current.slice();
+  for (let i = 0; i < 17; i++) {
+    const conf = current[i * 3 + 2] ?? 0;
+    if (conf < CONF_THRESHOLD) continue; // unreliable point — don't extrapolate, show as-is
+    for (let axis = 0; axis < 2; axis++) { // 0 = y, 1 = x
+      const idx = i * 3 + axis;
+      const curVal = current[idx] ?? 0;
+      const prevVal = previous[idx] ?? curVal;
+      const velocityPerMs = (curVal - prevVal) / deltaMs;
+      const displacement = Math.max(
+        -PREDICTION_MAX_DISPLACEMENT,
+        Math.min(PREDICTION_MAX_DISPLACEMENT, velocityPerMs * PREDICTION_LOOKAHEAD_MS)
+      );
+      predicted[idx] = curVal + displacement;
+    }
+  }
+  return predicted;
+}
+
 // NOTE on FSM angle math (fsmKp, below): deliberately NOT run through either stage above.
 // resize()'s square crop is crop-then-UNIFORM-scale (same scale factor S on both axes, just
 // offset differently per axis — confirmed against the native source), not an independent
@@ -258,9 +313,9 @@ const LIGHTING_PERSON_FLOOR   = 0.10;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── PERFORMANCE HUD ───────────────────────────────────────────────────────────
-// Set to false before your FYP presentation to hide the on-screen perf overlay.
-// [PERF] console logs are also suppressed when false.
-const PERF_HUD_ENABLED     = true;
+// PERF_HUD_ENABLED now lives in utils/debugFlags.ts, alongside DEBUG_LOGS — flip both there
+// before a demo/presentation for a clean console + screen. [PERF] console logs are also
+// suppressed when false.
 // Ring-buffer depth for rolling averages (FPS, latencies).
 // 30 samples ≈ 1 s at 30 fps — large enough to be stable, small enough to react.
 const PERF_AVG_WINDOW      = 30;
@@ -375,9 +430,29 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   // performance-oriented resolution independent of preview), so frame.width/frame.height
   // (consumed by the PART A/B corrections below) wouldn't reliably represent what's actually
   // shown on screen — and it also shrinks the crop mismatch PART A has to correct for.
+  // Also request the highest FPS this device/format combo supports (VisionCamera's filters
+  // are "closest match" scoring, not hard requirements, so asking for 60 safely degrades to
+  // whatever the matching format's real ceiling is). Without an explicit fps request here,
+  // the format filtered on aspect ratio alone could land on a lower-FPS mode than the
+  // hardware actually supports — capping camera frame delivery below what the (now
+  // GPU-accelerated, faster) inference pipeline could otherwise keep up with, which would
+  // show up as skeleton lag no amount of inference/JS-thread tuning could fix, since fresh
+  // frames simply wouldn't be arriving any faster.
   const format = useCameraFormat(device, [
     { videoAspectRatio: previewHeight / previewWidth },
+    { fps: 60 },
   ]);
+  // Clamp to the SELECTED format's actual max — requesting a Camera fps outside the chosen
+  // format's [minFps, maxFps] range is invalid, so this can never exceed real hardware limits.
+  const targetFps = format ? Math.min(60, format.maxFps) : undefined;
+  const loggedFormatRef = useRef(false);
+  if (format && !loggedFormatRef.current) {
+    loggedFormatRef.current = true;
+    console.log(
+      `[CAMERA] selected format: ${format.videoWidth}x${format.videoHeight} ` +
+      `fpsRange=${format.minFps}-${format.maxFps} requestedFps=${targetFps}`
+    );
+  }
 
   const [model, setModel] = useState<TensorflowModel | null>(null);
   const [keypoints, setKeypoints] = useState<number[]>([]);
@@ -386,6 +461,11 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const frameCount = useSharedValue(0);
   const deviceOrientationDeg = useSharedValue(isLandscape ? 90 : 0);
   const animatedKeypoints = useReanimatedValue<number[]>(new Array(51).fill(0));
+  // Previous frame's RAW (unpredicted) displayKp + its timestamp — velocity reference for
+  // predictKeypoints. Deliberately stores the raw detection, not the extrapolated result, so
+  // prediction error can't compound frame-over-frame.
+  const prevDisplayKpRef = useRef<number[] | null>(null);
+  const prevDisplayTsRef = useRef(0);
 
   // FSM instances
   const squatFsmRef = useRef(new SquatFsm());
@@ -465,6 +545,14 @@ export default function WorkoutScreen({ navigation, route }: Props) {
   const perfResizeMsRef  = useRef<number[]>([]);  // per-inference resize latency (ms)
   const lastPerfUpdateRef = useRef(0);             // last timestamp we called setPerfHud
   const lastPerfLogRef    = useRef(0);             // last timestamp we logged [PERF]
+  // Throttles setKeypoints/setInferenceMs/setResizeMs and the [POSE] log — these ran on
+  // every processed frame (16-28x/sec), each triggering a full WorkoutScreen re-render plus
+  // a string-building console.log, which congested the JS thread enough to delay how soon it
+  // was free to handle the NEXT frame's keypoints. Neither the skeleton (reads the reanimated
+  // shared value, not this state) nor any FSM's counting (reads fsmKp fresh every call) uses
+  // this state, so throttling it only affects the debug badge/HUD and how often the coach
+  // avatar's "tracking lost" check (trackedCount) refreshes — see DEBUG_LOG_INTERVAL_MS.
+  const lastDebugUpdateRef = useRef(0);
   // TEMP — diagnosing the skeleton-alignment aspect-ratio math. Remove once confirmed fixed.
   const lastAlignLogRef   = useRef(0);             // last timestamp we logged [ALIGN]
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -530,6 +618,9 @@ export default function WorkoutScreen({ navigation, route }: Props) {
     perfResizeMsRef.current = [];
     lastPerfUpdateRef.current = 0;
     lastPerfLogRef.current    = 0;
+    lastDebugUpdateRef.current = 0;
+    prevDisplayKpRef.current = null;
+    prevDisplayTsRef.current = 0;
 
     // Reset FSMs
     switch (exerciseId) {
@@ -685,6 +776,10 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         score >= 90 ? 'Excellent' : score >= 75 ? 'Good' : score >= 60 ? 'Fair' : 'Needs Work',
       source: 'live',
       sets: allSets.length,
+      // Only written for a genuine multi-set breakdown — never as an explicit `undefined`
+      // (Firebase RTDB's push()/set() reject any property valued `undefined`), so the key is
+      // conditionally spread in rather than assigned.
+      ...(allSets.length > 1 ? { setDetails: allSets.map((s) => s.reps) } : {}),
     };
     addWorkoutSession(session); // also persists to Firebase via AppContext
     // Fire proactive AI coaching message async — non-blocking, stores in context when ready.
@@ -782,9 +877,16 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       // frame processor call started just before isChatOpen flipped could still land here.
       if (isChatOpenRef.current) return;
 
-      setKeypoints(kp);
-      setInferenceMs(inferMs);
-      setResizeMs(resizeMsArg);
+      // Throttled — see lastDebugUpdateRef above. shouldUpdateDebug also gates the [POSE]
+      // log further down, so both fire together rather than drifting independently.
+      const nowForDebug = Date.now();
+      const shouldUpdateDebug = nowForDebug - lastDebugUpdateRef.current >= DEBUG_LOG_INTERVAL_MS;
+      if (shouldUpdateDebug) {
+        lastDebugUpdateRef.current = nowForDebug;
+        setKeypoints(kp);
+        setInferenceMs(inferMs);
+        setResizeMs(resizeMsArg);
+      }
 
       // ── Performance HUD tracking ────────────────────────────────────────────
       // All work here is on the JS thread; ring buffers are plain arrays in refs.
@@ -896,12 +998,20 @@ export default function WorkoutScreen({ navigation, route }: Props) {
       displayKp = applyCoverCropCorrection(displayKp, contentAspectDisplay, screenAspect);
       // ---------------------------------------------------------------------------
 
-      animatedKeypoints.value = withTiming(displayKp, {
+      // Motion prediction — see predictKeypoints/PREDICTION_LOOKAHEAD_MS above. Velocity is
+      // computed against the previous frame's RAW displayKp (stored below, before this frame's
+      // prediction), so extrapolation error never compounds across frames.
+      const predictDeltaMs = prevDisplayTsRef.current > 0 ? nowForDebug - prevDisplayTsRef.current : 0;
+      const predictedDisplayKp = predictKeypoints(displayKp, prevDisplayKpRef.current, predictDeltaMs);
+      prevDisplayKpRef.current = displayKp;
+      prevDisplayTsRef.current = nowForDebug;
+
+      animatedKeypoints.value = withTiming(predictedDisplayKp, {
         duration: SMOOTHING_MS,
         easing: Easing.linear,
       });
 
-      if (DEBUG) {
+      if (DEBUG && shouldUpdateDebug) {
         const sy  = ((fsmKp[5 * 3] ?? 0) + (fsmKp[6 * 3] ?? 0)) / 2;
         const hy  = ((fsmKp[11 * 3] ?? 0) + (fsmKp[12 * 3] ?? 0)) / 2;
         const ay  = ((fsmKp[15 * 3] ?? 0) + (fsmKp[16 * 3] ?? 0)) / 2;
@@ -1300,6 +1410,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         style={StyleSheet.absoluteFill}
         device={device}
         format={format}
+        fps={targetFps}
         isActive={!isChatOpen}
         frameProcessor={frameProcessor}
         onOutputOrientationChanged={(orientation) => {
@@ -1445,7 +1556,7 @@ export default function WorkoutScreen({ navigation, route }: Props) {
 
       {/* Performance HUD — MUST come after statusBorder in JSX and use zIndex > 1000
           so the absoluteFill status-border layer doesn't paint over it on Android.
-          Set PERF_HUD_ENABLED=false before your FYP presentation to hide this. */}
+          Set PERF_HUD_ENABLED=false in utils/debugFlags.ts before a demo to hide this. */}
       {PERF_HUD_ENABLED && (
         <View
           pointerEvents="none"

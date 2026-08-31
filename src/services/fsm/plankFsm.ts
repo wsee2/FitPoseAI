@@ -1,6 +1,5 @@
 import { calculateAngle, getKeypoint, type Keypoint } from '../poseMath';
-
-const DEBUG_PLANK = true;
+import { DEBUG_LOGS as DEBUG_PLANK, shouldLogFsmFrame } from '../../utils/debugFlags';
 
 // MoveNet (COCO-17) keypoint indices used by this FSM.
 const LEFT_SHOULDER = 5;
@@ -24,7 +23,35 @@ const SUPPORT_GAP_BENT = 0.034;
 const SUPPORT_GAP_STRAIGHT = 0.018;
 const LEGS_STRAIGHT_ANGLE = 130;
 const BODY_STRAIGHT_ANGLE = 152;
+// REVERTED 0.09→0.14: tightening to 0.09 was tried to catch hip-lift sooner, but confirmed
+// on-device that hDiff regularly swings 0.04-0.12 frame-to-frame during genuinely correct,
+// undisturbed holding — not just during a deliberate lift. Since plankState.status (the
+// on-screen red/green indicator) has no debounce of its own (only the hold TIMER does, via
+// plankBadFrames/PLANK_GRACE below), that overlap made the indicator flash red constantly
+// during good form. Back to 0.14: same conclusion as bodyAngle/legAngle below — this signal
+// doesn't cleanly separate good form from a moderate hip-lift at this camera placement, so a
+// tighter fixed threshold trades stability for a detection improvement it can't reliably
+// deliver. Catching hip-lift here would need a different signal or a camera reposition, not
+// a smaller number.
 const BODY_LEVEL_DIFF = 0.14;
+// REVERTED from gating back to debug-log-only (see legsLevel below) — confirmed on-device
+// this has the SAME instability as legAngle/legsStraight above: ankleDiff spiked above 0.06
+// repeatedly during a deliberate one-leg-down break (good, real separation), but flickered
+// back under 0.06 too fast for the PLANK_GRACE grace window to hold a freeze — one good-
+// looking frame mid-break was enough to immediately resume the timer. Kept for the debug log
+// only, same verdict and same reason as legAngle: ankle/knee-region tracking is too noisy at
+// this placement for either an angle-based or a height-based leg check to gate on safely.
+const ANKLE_LEVEL_DIFF = 0.06;
+// REVERTED from gating back to debug-log-only. Validation data (sustained positive vs.
+// sustained negative, unlike the flickering ankleDiff/legAngle attempts) came entirely from
+// HIGH-plank testing and held up there — but confirmed on-device that FOREARM plank has a
+// different body incline (forearms lower to the ground than a high plank's hands), and that
+// shifts the knee-to-ankle height relationship enough that kneeElevation reads consistently
+// NEGATIVE even during genuinely correct forearm-plank form (hold froze completely, stuck at
+// running=false, for an entire correct-form test). A single fixed threshold doesn't
+// generalize across the two accepted plank variants, so this can't gate safely without
+// somehow normalizing for plank sub-type first — not attempted here. Kept for the debug log.
+const KNEE_ELEVATION_MIN = 0.02;
 const SEVERE_BODY_ANGLE = 138;
 const SMOOTH_WINDOW = 5;
 // Lowered 0.3→0.15, plankFsm-only (each FSM defines its own CONF_THRESHOLD; squat/lunge/
@@ -142,7 +169,7 @@ export class PlankFsm {
       // in-progress hold instead (same pattern as pauseForChat, so a later confident frame
       // doesn't retroactively count the untracked gap as held time) and report an honest
       // "not currently tracked" state.
-      if (DEBUG_PLANK) {
+      if (DEBUG_PLANK && shouldLogFsmFrame()) {
         console.log(
           `[PLANK] LOW-CONFIDENCE FRAME, pausing — ` +
           `shoulderL=${shoulderL.conf.toFixed(2)} shoulderR=${shoulderR.conf.toFixed(2)} ` +
@@ -207,6 +234,29 @@ export class PlankFsm {
     const legsStraight = legAngle > LEGS_STRAIGHT_ANGLE;
     const bodyLevel = hDiff < BODY_LEVEL_DIFF;
 
+    // Candidate one-leg-down check — raw ankle Y-position difference, deliberately NOT the
+    // angle-based approach that failed above. Debug-log-only for now; see ANKLE_LEVEL_DIFF.
+    // NOTE: this specifically targets ONE ANKLE dropping relative to the other (e.g. one leg
+    // extended further back than the other) — a different fault from a KNEE touching the
+    // floor (see kneeElevation below), which is what "one knee down" actually is.
+    const ankleDiff = Math.abs(ankleL.y - ankleR.y);
+    const legsLevel = ankleDiff < ANKLE_LEVEL_DIFF;
+
+    // Candidate knee-on-floor check — NEW signal, geometrically distinct from both attempts
+    // above: a plain Y-coordinate gap (like bodyLevel/torsoElevated, which have held up
+    // reliably) rather than an angle (like the failed legAngle, which goes numerically noisy
+    // exactly when the leg is straight and the three points are nearly collinear) or a
+    // left/right symmetry check (like ankleDiff, which targets a different fault). +y =
+    // gravity here (see FSM_LANDSCAPE_*_TRANSFORM in WorkoutScreen.tsx), so the more
+    // floor-ward ankle is a floor-level reference, and the more floor-ward knee should sit
+    // meaningfully ABOVE it (smaller y) in a genuine straight-leg plank — collapsing toward
+    // ~0 (or going negative) if that knee is resting on the floor instead. Debug-log-only
+    // pending on-device validation, same process as every other signal in this file.
+    const floorY = Math.max(ankleL.y, ankleR.y);
+    const lowestKneeY = Math.max(kneeL.y, kneeR.y);
+    const kneeElevation = floorY - lowestKneeY;
+    const kneeElevated = kneeElevation > KNEE_ELEVATION_MIN;
+
     // bodyAngle/bodyStraight kept for the debug log only — NOT used to gate goodPlank/
     // severeBad anymore. Confirmed on-device across three separate placements (two
     // horizontal-floor sessions, one horizontal-table session) that this signal cannot
@@ -222,6 +272,12 @@ export class PlankFsm {
     // gate: the tradeoff is losing sag/pike detection specifically at these placements, in
     // exchange for the hold timer actually working.
     const bodyStraight = bodyAngle > BODY_STRAIGHT_ANGLE;
+    // legsLevel and kneeElevated NOT included — see ANKLE_LEVEL_DIFF's and
+    // KNEE_ELEVATION_MIN's comments above. Three separate leg-region signals have now each
+    // failed a different on-device test (angle: noise; ankle height: flicker; knee
+    // elevation: doesn't generalize across forearm vs. high plank) — accepting this as the
+    // same kind of camera-placement limitation already documented for bodyAngle, rather than
+    // continuing to iterate blind.
     const goodPlank = bodyLevel && torsoElevated;
     // severeBad used to have a buffer below goodPlank's threshold (bodyAngle < a MUCH lower
     // SEVERE_BODY_ANGLE) so a brief, noisy near-miss consumed the PLANK_GRACE window instead
@@ -258,7 +314,7 @@ export class PlankFsm {
       }
     }
 
-    if (DEBUG_PLANK) {
+    if (DEBUG_PLANK && shouldLogFsmFrame()) {
       const whyNot = !goodPlank
         ? ([
             !torsoElevated ? 'torsoElev' : null,
@@ -269,6 +325,8 @@ export class PlankFsm {
         `[PLANK] body=${bodyAngle.toFixed(1)}° hDiff=${hDiff.toFixed(3)} ` +
         `gap=${shoulderSupportGap.toFixed(3)} torsoElev=${torsoElevated} ` +
         `legsStraight=${legsStraight}(${legAngle.toFixed(1)}°) level=${bodyLevel} straight=${bodyStraight} ` +
+        `ankleDiff=${ankleDiff.toFixed(3)} legsLevel=${legsLevel} ` +
+        `kneeElev=${kneeElevation.toFixed(3)}(kneeConfL=${kneeL.conf.toFixed(2)},R=${kneeR.conf.toFixed(2)}) ` +
         `good=${goodPlank} severe=${severeBad} hold=${totalHold.toFixed(1)}s running=${this.plankStartTime !== null}` +
         (whyNot ? ` WHY_NOT:${whyNot}` : '')
       );

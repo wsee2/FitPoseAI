@@ -1,6 +1,5 @@
 import { calculateAngle, getKeypoint, type Keypoint } from '../poseMath';
-
-const DEBUG_PUSHUP = true;
+import { DEBUG_LOGS as DEBUG_PUSHUP, shouldLogFsmFrame } from '../../utils/debugFlags';
 
 // MoveNet (COCO-17) keypoint indices used by this FSM.
 const LEFT_SHOULDER = 5;
@@ -173,7 +172,7 @@ export class PushupFsm {
     // the raw elbow range were checked here).
     const goodDepth = (elbowAngle >= PERFECT_MIN && elbowAngle <= PERFECT_MAX) || dropTrigger;
 
-    if (DEBUG_PUSHUP) {
+    if (DEBUG_PUSHUP && shouldLogFsmFrame()) {
       console.log(
         `[PUSHUP] stage=${this.stage ?? 'null'} counter=${this.counter} ` +
         `elbow=${elbowAngle.toFixed(1)}° body=${bodyAngle.toFixed(1)}° ` +

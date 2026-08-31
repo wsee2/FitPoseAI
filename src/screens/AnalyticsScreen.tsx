@@ -280,6 +280,9 @@ export default function AnalyticsScreen({ navigation }: Props) {
           {/* Exercise breakdown */}
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Exercise Breakdown</Text>
+            <TouchableOpacity onPress={() => navigation.navigate('WorkoutHistory')}>
+              <Text style={styles.chartTapHint}>View All →</Text>
+            </TouchableOpacity>
           </View>
           <View style={styles.exerciseList}>
             {exerciseCounts.length === 0 ? (

@@ -29,6 +29,12 @@ export interface WorkoutSession {
   // saved before multi-set support (or if only a single set was ever run), so consumers
   // must treat a missing value as "1 set" rather than requiring it.
   sets?: number;
+  // Per-set breakdown, in order — reps for most exercises, held seconds for plank (same
+  // reps-field overload as the top-level `reps`/formatRepsOrHold convention). Optional and
+  // ONLY ever written for genuine multi-set sessions (length > 1) — never written as an
+  // explicit `undefined` (Firebase RTDB's `push`/`set` reject any property valued
+  // `undefined`), so its plain absence means "1 set" / "pre-multi-set session", same as `sets`.
+  setDetails?: number[];
 }
 
 export const EXERCISES: Record<ExerciseId, Exercise> = {

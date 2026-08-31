@@ -1,8 +1,5 @@
 import { calculateAngle, getKeypoint, spineLeanAngle } from '../poseMath';
-
-// TEMP — diagnosing camera-angle robustness the same way squatFsm.ts needed. Remove once
-// confirmed fixed (see [LUNGE] log below).
-const DEBUG_LUNGE = true;
+import { DEBUG_LOGS as DEBUG_LUNGE, shouldLogFsmFrame } from '../../utils/debugFlags';
 
 // MoveNet (COCO-17) keypoint indices used by this FSM.
 const LEFT_SHOULDER = 5;
@@ -176,7 +173,7 @@ export class LungeFsm {
       this.standingLegLength = Math.max(ankleY - hipY, 1e-6);
     }
 
-    if (DEBUG_LUNGE) {
+    if (DEBUG_LUNGE && shouldLogFsmFrame()) {
       console.log(
         `[LUNGE] stage=${this.stage} front=${frontKnee.toFixed(1)}° back=${backKneeRaw.toFixed(1)}° ` +
         `hipY=${hipY.toFixed(3)} standingHipY=${this.standingHipY?.toFixed(3) ?? 'null'} ` +

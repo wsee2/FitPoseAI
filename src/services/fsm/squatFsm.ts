@@ -1,9 +1,5 @@
 import { calculateAngle, getKeypoint, spineLeanAngle } from '../poseMath';
-
-// TEMP — diagnosing why the DOWN transition doesn't fire at an eye-level camera angle even
-// with HIP_DROP_DOWN added. Matches the DEBUG_PLANK/DEBUG_PUSHUP/DEBUG_SITUP pattern in the
-// sibling FSM files. Remove once resolved.
-const DEBUG_SQUAT = true;
+import { DEBUG_LOGS as DEBUG_SQUAT, shouldLogFsmFrame } from '../../utils/debugFlags';
 
 // MoveNet (COCO-17) keypoint indices used by this FSM.
 // Ported from a MediaPipe (33-landmark) prototype — mapping: 11/12->5/6 (shoulders),
@@ -203,7 +199,7 @@ export class SquatFsm {
       this.standingLegLength = Math.max(ankleY - hipY, 1e-6);
     }
 
-    if (DEBUG_SQUAT) {
+    if (DEBUG_SQUAT && shouldLogFsmFrame()) {
       console.log(
         `[SQUAT] stage=${this.stage} angle=${angle.toFixed(1)}° (L=${angleL.toFixed(1)} R=${angleR.toFixed(1)}) ` +
         `hipY=${hipY.toFixed(3)} ankleY=${ankleY.toFixed(3)} standingHipY=${this.standingHipY?.toFixed(3) ?? 'null'} ` +

@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
-  View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, ActivityIndicator,
+  View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -8,8 +8,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Colors, BorderRadius } from '../theme';
 import { ExerciseIcon } from '../components/ui/ExerciseIcon';
 import { useApp } from '../context/AppContext';
-import { EXERCISES, formatDuration, getScoreGrade, ExerciseId } from '../data/exercises';
-import { getHistory, type WorkoutRecord } from '../services/firebaseWorkout';
+import { EXERCISES, formatDuration, formatRepsOrHold, getScoreGrade, ExerciseId } from '../data/exercises';
 import { nowInMYT, mytDateStr } from '../utils/mytDate';
 import type { AnalyticsStackParamList } from '../navigation/types';
 
@@ -29,17 +28,6 @@ export default function WorkoutHistoryScreen({ navigation }: Props) {
   const insets = useSafeAreaInsets();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<ExerciseId | 'all'>('all');
-  const [cloudHistory, setCloudHistory] = useState<WorkoutRecord[] | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    getHistory().then((records) => {
-      if (!cancelled) setCloudHistory(records);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const filtered = workoutHistory.filter(s => {
     const ex = EXERCISES[s.exerciseId];
@@ -96,34 +84,6 @@ export default function WorkoutHistoryScreen({ navigation }: Props) {
         </View>
       </View>
 
-      {/* Cloud sync */}
-      <View style={styles.cloudSection}>
-        <Text style={styles.cloudTitle}>Cloud Sync · Last 5</Text>
-        {cloudHistory === null ? (
-          <View style={styles.cloudLoading}>
-            <ActivityIndicator size="small" color={Colors.cyan} />
-          </View>
-        ) : cloudHistory.length === 0 ? (
-          <Text style={styles.cloudEmpty}>No cloud-synced workouts yet</Text>
-        ) : (
-          <View style={styles.cloudList}>
-            {[...cloudHistory].reverse().map((record, i) => (
-              <View
-                key={`${record.timestamp}-${i}`}
-                style={[
-                  styles.cloudRow,
-                  i < cloudHistory.length - 1 && styles.sessionCardBorderBottom,
-                ]}
-              >
-                <Text style={styles.cloudExercise}>{record.exercise}</Text>
-                <Text style={styles.cloudMeta}>{record.reps} reps · {record.score} pts</Text>
-                <Text style={styles.cloudTimestamp}>{record.timestamp}</Text>
-              </View>
-            ))}
-          </View>
-        )}
-      </View>
-
       {/* Filters */}
       <FlatList
         data={FILTERS}
@@ -171,12 +131,27 @@ export default function WorkoutHistoryScreen({ navigation }: Props) {
                     <View style={styles.sessionMiddle}>
                       <Text style={styles.sessionName}>{ex.name}</Text>
                       <View style={styles.sessionMeta}>
-                        <Text style={styles.sessionMetaItem}>{session.reps} reps</Text>
+                        <Text style={styles.sessionMetaItem}>{formatRepsOrHold(session)}</Text>
                         <Text style={styles.sessionMetaDot}>·</Text>
                         <Text style={styles.sessionMetaItem}>{formatDuration(session.duration)}</Text>
                         <Text style={styles.sessionMetaDot}>·</Text>
                         <Text style={styles.sessionMetaItem}>{session.calories} kcal</Text>
+                        {session.sets != null && session.sets > 1 && (
+                          <>
+                            <Text style={styles.sessionMetaDot}>·</Text>
+                            <Text style={styles.sessionMetaItem}>{session.sets} sets</Text>
+                          </>
+                        )}
                       </View>
+                      {/* Per-set breakdown — only present for genuine multi-set sessions; old
+                          and 1-set sessions have no setDetails and simply skip this line. */}
+                      {session.setDetails && session.setDetails.length > 1 && (
+                        <Text style={styles.setDetailsText} numberOfLines={1}>
+                          {session.setDetails
+                            .map((v, i) => `Set ${i + 1}: ${session.exerciseId === 'plank' ? formatDuration(v) : v}`)
+                            .join('  ·  ')}
+                        </Text>
+                      )}
                       <View style={[styles.formBadge, { backgroundColor: `${ex.accentColor}18` }]}>
                         <Text style={[styles.formBadgeText, { color: ex.accentColor }]}>{session.formQuality}</Text>
                       </View>
@@ -213,33 +188,32 @@ const styles = StyleSheet.create({
   backText: { color: Colors.cyan, fontSize: 17, fontWeight: '600' },
   headerTitle: { flex: 1, fontSize: 20, fontWeight: '800', color: Colors.textPrimary },
   countBadge: { backgroundColor: Colors.cyanDim, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, color: Colors.cyan, fontSize: 13, fontWeight: '700' },
-  cloudSection: { paddingHorizontal: 20, marginBottom: 12 },
-  cloudTitle: { fontSize: 12, fontWeight: '700', color: Colors.textMuted, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 8 },
-  cloudLoading: { paddingVertical: 16, alignItems: 'center' },
-  cloudEmpty: { fontSize: 13, color: Colors.textMuted, paddingVertical: 8 },
-  cloudList: { backgroundColor: Colors.card, borderRadius: BorderRadius.xl, borderWidth: 1, borderColor: Colors.border, overflow: 'hidden' },
-  cloudRow: { paddingHorizontal: 14, paddingVertical: 10 },
-  cloudExercise: { fontSize: 14, fontWeight: '700', color: Colors.textPrimary, marginBottom: 2 },
-  cloudMeta: { fontSize: 12, color: Colors.textSecondary, marginBottom: 2 },
-  cloudTimestamp: { fontSize: 11, color: Colors.textMuted },
   searchWrapper: { paddingHorizontal: 20, marginBottom: 12 },
   searchContainer: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: Colors.card,
     borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.border,
-    paddingHorizontal: 14, paddingVertical: 10, gap: 8,
+    paddingHorizontal: 14, paddingVertical: 6, gap: 8,
   },
-  searchIcon: { fontSize: 15 },
+  searchIcon: { fontSize: 14 },
   searchInput: { flex: 1, fontSize: 15, color: Colors.textPrimary },
   clearIcon: { fontSize: 13, color: Colors.textMuted, padding: 4 },
-  filtersList: { maxHeight: 44, marginBottom: 12 },
-  filtersContent: { paddingHorizontal: 20, gap: 8 },
+  // No fixed height here — a tight maxHeight clipped the pills' text on devices with larger
+  // system font scaling (Android line-height can exceed a tight cap), which is what made the
+  // filter labels unreadable. Let the row size itself from filterChip's own content instead.
+  filtersList: { marginBottom: 12 },
+  filtersContent: { paddingHorizontal: 20, gap: 8, alignItems: 'center' },
+  // minHeight is a floor, not a cap — on devices whose system font has taller glyph metrics
+  // than the ones this was tuned against (confirmed: descenders in "Squat"/"Push-up"/"Lunge"/
+  // "Plank" were getting clipped by the pill's rounded-corner bounds, while "All" — the only
+  // label with no descenders — rendered fine), a tight box clips the bottom of the text even
+  // though the pill's own outline looks complete. Padding + lineHeight below give real margin.
   filterChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    paddingHorizontal: 14, paddingVertical: 8, borderRadius: BorderRadius.full,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5,
+    minHeight: 38, paddingHorizontal: 14, paddingVertical: 10, borderRadius: BorderRadius.full,
     backgroundColor: Colors.card, borderWidth: 1, borderColor: Colors.border,
   },
   filterChipActive: { borderColor: Colors.cyan, backgroundColor: Colors.cyanDim },
-  filterText: { fontSize: 13, fontWeight: '600', color: Colors.textMuted },
+  filterText: { fontSize: 13, lineHeight: 18, fontWeight: '600', color: Colors.textMuted },
   filterTextActive: { color: Colors.cyan },
   listContent: { paddingHorizontal: 20, gap: 16 },
   dateGroup: {},
@@ -253,6 +227,7 @@ const styles = StyleSheet.create({
   sessionMeta: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 6 },
   sessionMetaItem: { fontSize: 12, color: Colors.textMuted },
   sessionMetaDot: { fontSize: 10, color: Colors.textMuted },
+  setDetailsText: { fontSize: 11, color: Colors.textMuted, marginBottom: 6 },
   formBadge: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
   formBadgeText: { fontSize: 10, fontWeight: '700' },
   sessionRight: { alignItems: 'flex-end', gap: 2 },
