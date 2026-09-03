@@ -108,6 +108,19 @@ export class SquatFsm {
     const required = [shoulderL, shoulderR, hipL, hipR, kneeL, kneeR, ankleL, ankleR];
     if (required.some((p) => p.conf < CONF_THRESHOLD)) {
       // Low-confidence frame (e.g. body partially out of view) — don't miscount, just hold.
+      // DIAGNOSTIC — squatFsm previously had no visibility into this early-return at all
+      // (unlike plankFsm's equivalent "LOW-CONFIDENCE FRAME, pausing" log), so a report of
+      // depth silently not being recognized had no way to confirm which keypoint was
+      // actually failing or by how much. Mirrors plankFsm's log exactly; same throttle.
+      if (DEBUG_SQUAT && shouldLogFsmFrame()) {
+        console.log(
+          `[SQUAT] LOW-CONFIDENCE FRAME, pausing — ` +
+          `shoulderL=${shoulderL.conf.toFixed(2)} shoulderR=${shoulderR.conf.toFixed(2)} ` +
+          `hipL=${hipL.conf.toFixed(2)} hipR=${hipR.conf.toFixed(2)} ` +
+          `kneeL=${kneeL.conf.toFixed(2)} kneeR=${kneeR.conf.toFixed(2)} ` +
+          `ankleL=${ankleL.conf.toFixed(2)} ankleR=${ankleR.conf.toFixed(2)}`
+        );
+      }
       return this.lastState;
     }
 

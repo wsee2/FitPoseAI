@@ -287,7 +287,15 @@ export class PlankFsm {
     // of the two remaining checks): only a hDiff blowout well past BODY_LEVEL_DIFF (as seen
     // during genuine tracking breakdown, e.g. hDiff=0.25-0.33 in a confirmed bad stretch)
     // triggers an immediate freeze; a borderline miss still gets the grace window.
-    const severeBad = !torsoElevated || hDiff > BODY_LEVEL_DIFF * 2;
+    //
+    // FIXED: the line above was the intent, but `!torsoElevated ||` left torsoElevated with
+    // NO buffer at all — any single noisy frame (confirmed on-device: shoulderSupportGap
+    // blipping to ~0.002-0.006 for exactly one frame, surrounded by healthy 0.04-0.15
+    // readings) instantly froze the hold instead of absorbing into the grace window like a
+    // bodyLevel blip does. Dropped entirely — a torsoElevated failure now always goes through
+    // the same PLANK_GRACE window as bodyLevel; only a genuine hDiff blowout still freezes
+    // immediately.
+    const severeBad = hDiff > BODY_LEVEL_DIFF * 2;
 
     const neverStarted = this.plankHoldTime === 0 && this.plankStartTime === null;
 

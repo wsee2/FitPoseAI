@@ -4,7 +4,7 @@ import type { ExperienceLevel, FitnessGoal } from '../context/AppContext';
 // ---------------------------------------------------------------------------
 // Provider configuration — to swap back to Gemini: replace callLLM() + createChatSession()
 // internals only. Everything else (rate limiting, retry, prompts, exports) stays identical.
-const MODEL_NAME = 'gpt-4o-mini';
+const MODEL_NAME = 'gpt-5-mini';
 const OPENAI_API_KEY = process.env.EXPO_PUBLIC_OPENAI_API_KEY ?? '';
 const OPENAI_API_BASE = 'https://api.openai.com/v1';
 
@@ -104,7 +104,24 @@ async function callLLM(messages: ChatMessage[]): Promise<string> {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${OPENAI_API_KEY}`,
     },
-    body: JSON.stringify({ model: MODEL_NAME, messages, max_tokens: 400, temperature: 0.85 }),
+    // gpt-5-mini is a reasoning-capable model (same family as o1/o3): the Chat Completions API
+    // requires max_completion_tokens instead of max_tokens for these, and only accepts the
+    // default temperature (1) — a custom value like the old 0.85 causes a 400. Omitting
+    // temperature entirely uses that default rather than setting it explicitly.
+    //
+    // max_completion_tokens covers HIDDEN reasoning tokens + the visible reply combined — at
+    // the original 400 (fine for non-reasoning gpt-4o-mini, where all of it was visible
+    // output), gpt-5-mini could spend the whole budget on internal reasoning and return an
+    // empty content string with a 200 OK (confirmed on-device: empty coach replies, no
+    // error). Raised to 900 for headroom, and reasoning_effort: 'minimal' tells the model not
+    // to reason heavily for what's meant to be a short, direct chat reply — this is the
+    // GPT-5-family control for exactly this tradeoff, and also addresses the latency concern
+    // flagged when this model was first chosen.
+    body: JSON.stringify({
+      model: MODEL_NAME, messages,
+      max_completion_tokens: 900,
+      reasoning_effort: 'minimal',
+    }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
