@@ -1,4 +1,4 @@
-<img width="620" height="1280" alt="WhatsApp Image 2026-10-30 at 11 42 46 PM" src="https://github.com/user-attachments/assets/1508fafe-c1de-4bf3-82f5-643ec11271c7" />FitPose AI – Real-Time Posture Correction System for Home Fitness Using Human Pose Estimation
+FitPose AI – Real-Time Posture Correction System for Home Fitness Using Human Pose Estimation
 An AI-powered mobile fitness application that helps users improve their exercise posture through real-time human pose estimation, movement analysis, and personalised feedback.
 <img width="291" height="629" alt="image" src="https://github.com/user-attachments/assets/4b93dd38-aa52-48f2-a55f-396de6856670" />
 <img width="293" height="634" alt="image" src="https://github.com/user-attachments/assets/36452851-c9ae-4b87-9145-fd32a72c7288" />
