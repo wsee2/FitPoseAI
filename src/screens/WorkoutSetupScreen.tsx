@@ -80,7 +80,7 @@ export default function WorkoutSetupScreen({ navigation, route }: Props) {
           {/* Per-set target */}
           <View style={styles.settingRow}>
             <View style={styles.settingTextCol}>
-              <Text style={styles.settingLabel}>{isPlank ? 'Hold Time / Set' : 'Reps / Set'}</Text>
+              <Text style={styles.settingLabel}>{isPlank ? 'Hold Time' : 'Reps'}</Text>
               <Text style={styles.settingHint}>Defaults from your experience level</Text>
             </View>
             <View style={styles.stepperControl}>

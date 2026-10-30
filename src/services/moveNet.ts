@@ -17,6 +17,13 @@ export const MOVENET_INPUT_SIZE = 192;
 // INT8 than for float models, so it's a genuine, not-guaranteed experiment either way.
 const TRY_GPU_DELEGATE = true;
 
+// TEMPORARY BENCHMARKING AID for the FYP delegate comparison table — set to 'gpu', 'nnapi',
+// or 'cpu' to force that ONE delegate with no fallback chain, so a failed/slow load isn't
+// silently masked by falling through to the next delegate. Leave as `null` for normal use:
+// `null` reproduces today's exact GPU→NNAPI→CPU fallback behavior (via TRY_GPU_DELEGATE
+// above) with zero other changes. REMEMBER TO SET THIS BACK TO `null` AFTER BENCHMARKING.
+const FORCE_DELEGATE: 'gpu' | 'nnapi' | 'cpu' | null = 'cpu';
+
 export async function loadMoveNetModel(): Promise<TensorflowModel> {
   if (model) return model;
   const asset = Asset.fromModule(
@@ -25,27 +32,38 @@ export async function loadMoveNetModel(): Promise<TensorflowModel> {
   await asset.downloadAsync();
   if (!asset.localUri) throw new Error('Model asset download failed — localUri is null');
 
-  if (TRY_GPU_DELEGATE) {
-    try {
+  if (FORCE_DELEGATE) {
+    if (FORCE_DELEGATE === 'gpu') {
       model = await loadTensorflowModel({ url: asset.localUri }, ['android-gpu']);
-      console.log('✅ MoveNet loaded (delegate: android-gpu)');
-    } catch (err) {
-      console.warn('GPU delegate failed, falling back to NNAPI:', err);
-    }
-  }
-
-  // Unchanged from before this experiment — reached whenever TRY_GPU_DELEGATE is false, or
-  // as the fallback when the GPU delegate above failed to load. NNAPI hardware-accelerates
-  // inference via the device's DSP/GPU through Android's Neural Networks API. Some older
-  // SoCs have flaky NNAPI drivers, so fall back to the plain CPU delegate if it fails too.
-  if (!model) {
-    try {
+    } else if (FORCE_DELEGATE === 'nnapi') {
       model = await loadTensorflowModel({ url: asset.localUri }, ['nnapi']);
-      console.log('✅ MoveNet loaded (delegate: nnapi)');
-    } catch (err) {
-      console.warn('NNAPI delegate failed, falling back to CPU:', err);
+    } else {
       model = await loadTensorflowModel({ url: asset.localUri }, []);
-      console.log('✅ MoveNet loaded (delegate: cpu)');
+    }
+    console.log(`✅ MoveNet loaded (delegate: FORCED ${FORCE_DELEGATE}, no fallback)`);
+  } else {
+    if (TRY_GPU_DELEGATE) {
+      try {
+        model = await loadTensorflowModel({ url: asset.localUri }, ['android-gpu']);
+        console.log('✅ MoveNet loaded (delegate: android-gpu)');
+      } catch (err) {
+        console.warn('GPU delegate failed, falling back to NNAPI:', err);
+      }
+    }
+
+    // Unchanged from before this experiment — reached whenever TRY_GPU_DELEGATE is false, or
+    // as the fallback when the GPU delegate above failed to load. NNAPI hardware-accelerates
+    // inference via the device's DSP/GPU through Android's Neural Networks API. Some older
+    // SoCs have flaky NNAPI drivers, so fall back to the plain CPU delegate if it fails too.
+    if (!model) {
+      try {
+        model = await loadTensorflowModel({ url: asset.localUri }, ['nnapi']);
+        console.log('✅ MoveNet loaded (delegate: nnapi)');
+      } catch (err) {
+        console.warn('NNAPI delegate failed, falling back to CPU:', err);
+        model = await loadTensorflowModel({ url: asset.localUri }, []);
+        console.log('✅ MoveNet loaded (delegate: cpu)');
+      }
     }
   }
   console.log('Input shape:', JSON.stringify(model.inputs[0].shape));

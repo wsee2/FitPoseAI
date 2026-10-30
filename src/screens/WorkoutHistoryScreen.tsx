@@ -8,7 +8,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Colors, BorderRadius } from '../theme';
 import { ExerciseIcon } from '../components/ui/ExerciseIcon';
 import { useApp } from '../context/AppContext';
-import { EXERCISES, formatDuration, formatRepsOrHold, getScoreGrade, ExerciseId } from '../data/exercises';
+import { EXERCISES, formatDuration, formatFormScore, getScoreGrade, getAchievementScore, ExerciseId } from '../data/exercises';
 import { nowInMYT, mytDateStr } from '../utils/mytDate';
 import type { AnalyticsStackParamList } from '../navigation/types';
 
@@ -119,7 +119,10 @@ export default function WorkoutHistoryScreen({ navigation }: Props) {
             <View style={styles.sessionGroup}>
               {sessions.map((session, idx) => {
                 const ex = EXERCISES[session.exerciseId];
-                const grade = getScoreGrade(session.score);
+                // Grade is achievement-based (did the session hit its rep/set target) — see
+                // getAchievementScore. Form-quality score (was form good) shown separately
+                // via formatFormScore below, which already includes the rep/hold count.
+                const grade = getScoreGrade(getAchievementScore(session));
                 return (
                   <View key={session.id} style={[
                     styles.sessionCard,
@@ -131,7 +134,7 @@ export default function WorkoutHistoryScreen({ navigation }: Props) {
                     <View style={styles.sessionMiddle}>
                       <Text style={styles.sessionName}>{ex.name}</Text>
                       <View style={styles.sessionMeta}>
-                        <Text style={styles.sessionMetaItem}>{formatRepsOrHold(session)}</Text>
+                        <Text style={styles.sessionMetaItem}>{formatFormScore(session)}</Text>
                         <Text style={styles.sessionMetaDot}>·</Text>
                         <Text style={styles.sessionMetaItem}>{formatDuration(session.duration)}</Text>
                         <Text style={styles.sessionMetaDot}>·</Text>
@@ -158,7 +161,7 @@ export default function WorkoutHistoryScreen({ navigation }: Props) {
                     </View>
                     <View style={styles.sessionRight}>
                       <Text style={[styles.gradeText, { color: grade.color }]}>{grade.grade}</Text>
-                      <Text style={styles.scoreText}>{session.score} pts</Text>
+                      <Text style={styles.scoreText}>{getAchievementScore(session)}%</Text>
                     </View>
                   </View>
                 );

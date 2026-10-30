@@ -776,6 +776,8 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         score >= 90 ? 'Excellent' : score >= 75 ? 'Good' : score >= 60 ? 'Fair' : 'Needs Work',
       source: 'live',
       sets: allSets.length,
+      targetReps: target,
+      targetSets: totalSets,
       // Only written for a genuine multi-set breakdown — never as an explicit `undefined`
       // (Firebase RTDB's push()/set() reject any property valued `undefined`), so the key is
       // conditionally spread in rather than assigned.
@@ -1537,8 +1539,11 @@ export default function WorkoutScreen({ navigation, route }: Props) {
         </View>
       )}
 
-      {/* Debug badge */}
-      <View style={styles.debugBadge}>
+      {/* Debug badge — bumped up during 'active' so it clears perfHud's 3-line block below it
+          (perfHud sits at bottom: tabBarHeight+12 with ~60px of content height there, and has
+          a higher zIndex, so without this the two were overlapping/painting over each other).
+          No adjustment needed outside 'active': perfHud moves to the top in those phases. */}
+      <View style={[styles.debugBadge, phase === 'active' && { bottom: tabBarHeight + 85 }]}>
         <Text style={styles.debugText}>
           {model
             ? `${phase.toUpperCase()}  •  Tracking ${trackedCount}/17${

@@ -5,6 +5,15 @@ import type { ExperienceLevel, FitnessGoal } from '../context/AppContext';
 // Provider configuration — to swap back to Gemini: replace callLLM() + createChatSession()
 // internals only. Everything else (rate limiting, retry, prompts, exports) stays identical.
 const MODEL_NAME = 'gpt-5-mini';
+// Human-readable label for the AI Coach screen header. DERIVED from MODEL_NAME rather than
+// written out again, because the hardcoded copy went stale the moment the model was swapped
+// (the header still read "GPT-4o Mini" long after the move to gpt-5-mini). Format matches the
+// old label exactly: 'gpt-5-mini' → 'GPT-5 Mini', 'gpt-4o-mini' → 'GPT-4o Mini'.
+export const MODEL_DISPLAY_NAME = (() => {
+  const [family, version, ...rest] = MODEL_NAME.split('-');
+  const head = version ? `${family.toUpperCase()}-${version}` : family.toUpperCase();
+  return [head, ...rest.map((p) => p.charAt(0).toUpperCase() + p.slice(1))].join(' ');
+})();
 const OPENAI_API_KEY = process.env.EXPO_PUBLIC_OPENAI_API_KEY ?? '';
 const OPENAI_API_BASE = 'https://api.openai.com/v1';
 

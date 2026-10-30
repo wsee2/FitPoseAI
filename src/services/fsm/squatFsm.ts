@@ -42,6 +42,28 @@ const CONF_THRESHOLD = 0.3;
 // the angle thresholds above, ideally testing at both a low and an eye-level camera position.
 const HIP_DROP_DOWN = 0.35;
 
+// Second-tier fallback for when the camera's framing/distance doesn't include the ankles at
+// all — confirmed on-device: ankle confidence sitting at 0.01-0.09 for an entire session
+// (not a borderline-under-threshold case like plankFsm's shoulder/hip confidence tuning —
+// genuinely no signal), with [POSE] showing ankle Y at/beyond the frame's bottom edge
+// (~0.95-1.03). HIP_DROP_DOWN itself still needs one trustworthy ankle reading to calibrate
+// standingLegLength, so it can't help here either. Knee confidence tracked far more reliably
+// in the same log (commonly 0.4-0.9), so this reuses the same self-calibrating-fraction idea
+// as HIP_DROP_DOWN, but against hip-to-KNEE distance (thigh length) instead of hip-to-ankle
+// (full leg length) — geometrically sound because a thigh rotates from vertical (standing)
+// toward horizontal (at depth), so its vertical extent shrinks the same way full leg length
+// does, just using a reference point that's actually visible when ankles aren't.
+// UNTESTED — a starting estimate, not empirically validated: thigh length is typically
+// roughly half of full hip-to-ankle leg length, so the same real hip drop should read as
+// roughly double the HIP_DROP_DOWN fraction against the smaller thigh-length denominator.
+// Retune on-device like every other threshold in this file.
+const THIGH_DROP_DOWN = 0.6;
+// "Still standing" counterpart for the ankle-untrusted path — mirrors STANDING_ANGLE's role
+// but against thighDropFrac instead of the (ankle-dependent, unusable here) knee angle. Also
+// untested; should sit comfortably below THIGH_DROP_DOWN so there's a clear dead zone between
+// "standing" and "at depth", same relationship STANDING_ANGLE/BOTTOM_ANGLE already have.
+const THIGH_STANDING_MAX = 0.15;
+
 export type SquatStage = 'UP' | 'DOWN' | null;
 
 export interface SquatFsmState {
@@ -73,6 +95,8 @@ export class SquatFsm {
   // comment above HIP_DROP_DOWN.
   private standingHipY: number | null = null;
   private standingLegLength: number | null = null;
+  // Standing reference for THIGH_DROP_DOWN — captured at the same moments as the two above.
+  private standingThighLength: number | null = null;
 
   reset(): void {
     this.stage = null;
@@ -82,6 +106,7 @@ export class SquatFsm {
     this.smoothBuffer = [];
     this.standingHipY = null;
     this.standingLegLength = null;
+    this.standingThighLength = null;
     this.lastState = INITIAL_SQUAT_STATE;
   }
 
@@ -92,6 +117,7 @@ export class SquatFsm {
     this.smoothBuffer = [];
     this.standingHipY = null;
     this.standingLegLength = null;
+    this.standingThighLength = null;
   }
 
   /** Feed one frame of MoveNet keypoints (flattened length-51 array). */
@@ -105,13 +131,15 @@ export class SquatFsm {
     const ankleL = getKeypoint(keypoints, LEFT_ANKLE);
     const ankleR = getKeypoint(keypoints, RIGHT_ANKLE);
 
-    const required = [shoulderL, shoulderR, hipL, hipR, kneeL, kneeR, ankleL, ankleR];
+    // Ankle NOT required — confirmed on-device (see THIGH_DROP_DOWN above) that a tight/close
+    // camera framing can leave ankle confidence near-zero for an entire session, which used
+    // to block this whole function every single frame and freeze the FSM's last state
+    // indefinitely. Best-effort now: ankleTrusted (below) gates every specific use of ankle
+    // data (the angle-based checks, footDiff) so ungated garbage ankle positions can't
+    // corrupt those signals — thighDropFrac/THIGH_DROP_DOWN covers depth detection instead.
+    const required = [shoulderL, shoulderR, hipL, hipR, kneeL, kneeR];
     if (required.some((p) => p.conf < CONF_THRESHOLD)) {
       // Low-confidence frame (e.g. body partially out of view) — don't miscount, just hold.
-      // DIAGNOSTIC — squatFsm previously had no visibility into this early-return at all
-      // (unlike plankFsm's equivalent "LOW-CONFIDENCE FRAME, pausing" log), so a report of
-      // depth silently not being recognized had no way to confirm which keypoint was
-      // actually failing or by how much. Mirrors plankFsm's log exactly; same throttle.
       if (DEBUG_SQUAT && shouldLogFsmFrame()) {
         console.log(
           `[SQUAT] LOW-CONFIDENCE FRAME, pausing — ` +
@@ -123,6 +151,7 @@ export class SquatFsm {
       }
       return this.lastState;
     }
+    const ankleTrusted = ankleL.conf >= CONF_THRESHOLD && ankleR.conf >= CONF_THRESHOLD;
 
     const angleL = calculateAngle(hipL, kneeL, ankleL);
     const angleR = calculateAngle(hipR, kneeR, ankleR);
@@ -137,24 +166,40 @@ export class SquatFsm {
     const leanR = spineLeanAngle(shoulderR, hipR);
     const lean = (leanL + leanR) / 2;
 
+    // footDiff/kneeSym are ankle/angle-derived — only meaningful when ankleTrusted (below).
     const footDiff = Math.abs(ankleL.y - ankleR.y);
     const kneeSym = Math.abs(angleL - angleR);
 
-    // Hip-drop fraction against the standing reference captured on prior 'UP' frames (see
-    // HIP_DROP_DOWN above) — computed BEFORE this frame's reference refresh below, so a
-    // rep-starting frame is measured against where standing actually was, not against itself.
+    // Hip-drop fractions against the standing references captured on prior 'UP' frames (see
+    // HIP_DROP_DOWN/THIGH_DROP_DOWN above) — computed BEFORE this frame's reference refresh
+    // below, so a rep-starting frame is measured against where standing actually was, not
+    // against itself.
     const hipY = (hipL.y + hipR.y) / 2;
+    const kneeY = (kneeL.y + kneeR.y) / 2;
     const ankleY = (ankleL.y + ankleR.y) / 2;
     const hipDropFrac =
       this.standingHipY != null && this.standingLegLength != null
         ? (hipY - this.standingHipY) / this.standingLegLength
         : 0;
+    const thighDropFrac =
+      this.standingHipY != null && this.standingThighLength != null
+        ? (hipY - this.standingHipY) / this.standingThighLength
+        : 0;
 
-    if (angle > STANDING_ANGLE) {
+    // "Genuinely standing" — angle-based when ankle is trusted (original, unchanged
+    // behavior). When it isn't, falls back to thighDropFrac; before any thigh reference
+    // exists yet (this.standingHipY == null), defaults to true so the very first frame can
+    // bootstrap a reference at all — same cold-start assumption the angle path implicitly
+    // makes (it also has no better information before its first confident reading).
+    const genuinelyStanding = ankleTrusted
+      ? angle > STANDING_ANGLE
+      : this.standingHipY == null || thighDropFrac < THIGH_STANDING_MAX;
+
+    if (genuinelyStanding) {
       if (this.stage === 'DOWN') {
         this.counter += 1;
         this.score += this.squatFormGood ? 10 : 5;
-        // Deliberately NOT resetting standingHipY/standingLegLength here. An earlier version
+        // Deliberately NOT resetting standing*/legLength/thighLength here. An earlier version
         // did, so each rep had to re-converge on a true standing reference from scratch — but
         // that only gets to observe frames while angle > STANDING_ANGLE, and with
         // SMOOTH_WINDOW adding lag to the angle signal, that window can be too short/noisy at
@@ -169,17 +214,25 @@ export class SquatFsm {
       this.stage = 'UP';
     }
 
-    // angleTrigger keeps the ORIGINAL Python-prototype-validated behavior unchanged: knee
-    // angle crossing BOTTOM_ANGLE, gated by kneeSym (L/R knee-angle symmetry) as a stability
-    // check. hipTrigger deliberately does NOT gate on kneeSym: kneeSym is itself a 2D-
-    // projected-angle metric, and at a camera angle where the pure knee-angle trigger already
-    // fails (see HIP_DROP_DOWN comment above), small real L/R asymmetries get exaggerated the
-    // same way — confirmed empirically (kneeSym reached 50+ degrees during a genuine, controlled
-    // squat at an eye-level camera). Applying it to the hip-drop path would defeat the point of
-    // adding a camera-angle-robust signal. footDiff (ankle L/R level-ness) stays a shared gate
-    // for both — it held reliably low throughout the same test, so it's not camera-angle-fragile.
-    const angleTrigger = angle < BOTTOM_ANGLE && kneeSym < KNEE_SYM_DOWN;
-    const hipTrigger = hipDropFrac > HIP_DROP_DOWN;
+    // angleTrigger/hipTrigger keep the ORIGINAL Python-prototype-validated behavior
+    // unchanged, but only when ankleTrusted — an untrusted ankle's position is essentially
+    // noise (confirmed on-device: 0.01-0.09 confidence for a whole session), so letting it
+    // feed the knee angle or hipDropFrac's leg-length reference would produce meaningless
+    // values rather than just "no signal". angleTrigger is gated by kneeSym (L/R knee-angle
+    // symmetry) as a stability check. hipTrigger deliberately does NOT gate on kneeSym:
+    // kneeSym is itself a 2D-projected-angle metric, and at a camera angle where the pure
+    // knee-angle trigger already fails (see HIP_DROP_DOWN comment above), small real L/R
+    // asymmetries get exaggerated the same way — confirmed empirically (kneeSym reached 50+
+    // degrees during a genuine, controlled squat at an eye-level camera). Applying it to the
+    // hip-drop path would defeat the point of adding a camera-angle-robust signal. footDiff
+    // (ankle L/R level-ness) stays a shared gate for both when ankleTrusted — it held
+    // reliably low throughout the same test, so it's not camera-angle-fragile, just
+    // ankle-visibility-fragile like everything else ankle-derived here.
+    const angleTrigger = ankleTrusted && angle < BOTTOM_ANGLE && kneeSym < KNEE_SYM_DOWN;
+    const hipTrigger = ankleTrusted && hipDropFrac > HIP_DROP_DOWN;
+    // Ankle-independent depth trigger — see THIGH_DROP_DOWN above. The only depth signal
+    // that still works when the camera framing doesn't reach the ankles at all.
+    const thighTrigger = thighDropFrac > THIGH_DROP_DOWN;
     // Camera-angle-robust "reached proper squat depth" signal — reused below for score,
     // feedback text, and skeleton status, not just this trigger. Without this, a squat could
     // correctly COUNT via hipTrigger yet still score/display as "not perfect", purely because
@@ -191,15 +244,20 @@ export class SquatFsm {
     // and only very deep squats (where the distorted angle eventually wandered into range by
     // coincidence) flashed green — also still scoring only 5, since that happened after the
     // trigger had already fired and locked the score.
-    const goodDepth = (angle >= PERFECT_MIN && angle <= PERFECT_MAX) || hipDropFrac > HIP_DROP_DOWN;
-    if (this.stage === 'UP' && (angleTrigger || hipTrigger) && footDiff < FOOT_DIFF_DOWN) {
+    const goodDepth =
+      (ankleTrusted && angle >= PERFECT_MIN && angle <= PERFECT_MAX) ||
+      (ankleTrusted && hipDropFrac > HIP_DROP_DOWN) ||
+      thighDropFrac > THIGH_DROP_DOWN;
+    // footDiff only gates when ankleTrusted — an untrusted ankle's L/R Y-difference is
+    // meaningless and would otherwise block a legitimate thighTrigger-based rep.
+    if (this.stage === 'UP' && (angleTrigger || hipTrigger || thighTrigger) && (!ankleTrusted || footDiff < FOOT_DIFF_DOWN)) {
       this.stage = 'DOWN';
       this.squatFormGood = goodDepth && lean < LEAN_BAD;
     }
 
     // Track the BEST (smallest/most-standing) hipY seen across the whole set (see the note
     // above — deliberately not reset per rep), instead of overwriting the reference with
-    // whatever the latest angle > STANDING_ANGLE frame happens to show. Confirmed via a
+    // whatever the latest genuinely-standing frame happens to show. Confirmed via a
     // second [SQUAT] log round: a single frame during a fast
     // bounce between reps briefly smoothed-angle-crossed STANDING_ANGLE without the user
     // actually being fully upright (standingHipY got set to 0.658, when true standing was
@@ -207,32 +265,41 @@ export class SquatFsm {
     // hipDropFrac from ever crossing HIP_DROP_DOWN, even on a clean, deep, symmetric squat.
     // Only updating when a frame is BETTER than what's already recorded makes the reference
     // converge to, and stay at, the true standing position and ignore worse transient readings.
-    if (angle > STANDING_ANGLE && (this.standingHipY == null || hipY < this.standingHipY)) {
+    // Gated on genuinelyStanding (not raw angle > STANDING_ANGLE) so this still converges via
+    // the thigh-based path when ankle isn't trusted — otherwise standingThighLength could
+    // never be captured at all when ankle confidence never recovers for a whole session.
+    if (genuinelyStanding && (this.standingHipY == null || hipY < this.standingHipY)) {
       this.standingHipY = hipY;
       this.standingLegLength = Math.max(ankleY - hipY, 1e-6);
+      this.standingThighLength = Math.max(kneeY - hipY, 1e-6);
     }
 
     if (DEBUG_SQUAT && shouldLogFsmFrame()) {
       console.log(
-        `[SQUAT] stage=${this.stage} angle=${angle.toFixed(1)}° (L=${angleL.toFixed(1)} R=${angleR.toFixed(1)}) ` +
-        `hipY=${hipY.toFixed(3)} ankleY=${ankleY.toFixed(3)} standingHipY=${this.standingHipY?.toFixed(3) ?? 'null'} ` +
-        `standingLegLen=${this.standingLegLength?.toFixed(3) ?? 'null'} hipDropFrac=${hipDropFrac.toFixed(3)} ` +
+        `[SQUAT] stage=${this.stage} angle=${angle.toFixed(1)}° (L=${angleL.toFixed(1)} R=${angleR.toFixed(1)}) ankleTrusted=${ankleTrusted} ` +
+        `hipY=${hipY.toFixed(3)} kneeY=${kneeY.toFixed(3)} ankleY=${ankleY.toFixed(3)} standingHipY=${this.standingHipY?.toFixed(3) ?? 'null'} ` +
+        `standingLegLen=${this.standingLegLength?.toFixed(3) ?? 'null'} standingThighLen=${this.standingThighLength?.toFixed(3) ?? 'null'} ` +
+        `hipDropFrac=${hipDropFrac.toFixed(3)} thighDropFrac=${thighDropFrac.toFixed(3)}(>${THIGH_DROP_DOWN}) ` +
         `footDiff=${footDiff.toFixed(3)}(<${FOOT_DIFF_DOWN}) kneeSym=${kneeSym.toFixed(1)}(<${KNEE_SYM_DOWN}) ` +
-        `angleTrigger=${angleTrigger} hipTrigger=${hipTrigger}`
+        `angleTrigger=${angleTrigger} hipTrigger=${hipTrigger} thighTrigger=${thighTrigger}`
       );
     }
 
-    const excessiveLean = lean > LEAN_BAD && angle < 155;
+    // The "not fully standing" restriction only applies when angle is trustworthy — an
+    // untrusted ankle could put `angle` anywhere, which would otherwise risk spurious "Lean
+    // back" warnings/status flicker from garbage data rather than a real lean. `lean` itself
+    // (shoulder-hip only) stays reliable regardless of ankle visibility.
+    const excessiveLean = lean > LEAN_BAD && (!ankleTrusted || angle < 155);
     let feedback: string;
-    if (footDiff > FOOT_DIFF_BAD) {
+    if (ankleTrusted && footDiff > FOOT_DIFF_BAD) {
       feedback = 'Keep both feet level';
     } else if (excessiveLean) {
       feedback = 'Lean back - straighten';
-    } else if (kneeSym > KNEE_SYM_BAD && angle < 155) {
+    } else if (ankleTrusted && kneeSym > KNEE_SYM_BAD && angle < 155) {
       feedback = 'Distribute weight evenly';
-    } else if (angle > STANDING_ANGLE) {
+    } else if (genuinelyStanding) {
       feedback = 'Go Down';
-    } else if (angle < TOO_LOW_ANGLE) {
+    } else if (ankleTrusted && angle < TOO_LOW_ANGLE) {
       feedback = 'Too Low - rise slightly';
     } else if (goodDepth) {
       feedback = 'Perfect Squat Depth';
@@ -243,7 +310,7 @@ export class SquatFsm {
     let status: 'good' | 'adjust' | 'error' | 'guide';
     if (this.stage === null) {
       status = 'guide';
-    } else if (footDiff > FOOT_DIFF_BAD || excessiveLean || (kneeSym > KNEE_SYM_BAD && angle < 155) || angle < TOO_LOW_ANGLE) {
+    } else if ((ankleTrusted && footDiff > FOOT_DIFF_BAD) || excessiveLean || (ankleTrusted && kneeSym > KNEE_SYM_BAD && angle < 155) || (ankleTrusted && angle < TOO_LOW_ANGLE)) {
       status = 'error';
     } else if (goodDepth) {
       status = 'good';

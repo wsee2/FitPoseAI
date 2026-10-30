@@ -38,6 +38,16 @@ const CONF_THRESHOLD = 0.3;
 // for a ~90-degree-ish leg bend) is comparable — retune empirically if needed.
 const HIP_DROP_DOWN = 0.35;
 
+// Second-tier fallback for when the camera framing doesn't include the ankles at all — see
+// squatFsm.ts's THIGH_DROP_DOWN for the full on-device evidence and reasoning (confirmed
+// there: ankle confidence can sit at 0.01-0.09 for an entire session, with ankle Y at/beyond
+// the frame's bottom edge, while knee confidence stays far more reliable). Same idea here:
+// hip-to-KNEE distance (thigh length) instead of hip-to-ankle (full leg length) as the
+// self-calibrating denominator. Reusing squat's untested starting estimates as-is, same way
+// HIP_DROP_DOWN above already reuses squat's validated value — retune on-device if needed.
+const THIGH_DROP_DOWN = 0.6;
+const THIGH_STANDING_MAX = 0.15;
+
 export type LungeStage = 'UP' | 'DOWN' | null;
 
 export interface LungeFsmState {
@@ -71,6 +81,8 @@ export class LungeFsm {
   // re-converge from a too-short/noisy window, breaking every rep after the first one or two).
   private standingHipY: number | null = null;
   private standingLegLength: number | null = null;
+  // Standing reference for THIGH_DROP_DOWN — captured at the same moments as the two above.
+  private standingThighLength: number | null = null;
 
   reset(): void {
     this.stage = null;
@@ -80,6 +92,7 @@ export class LungeFsm {
     this.smoothBuffer = [];
     this.standingHipY = null;
     this.standingLegLength = null;
+    this.standingThighLength = null;
     this.lastState = INITIAL_LUNGE_STATE;
   }
 
@@ -90,6 +103,7 @@ export class LungeFsm {
     this.smoothBuffer = [];
     this.standingHipY = null;
     this.standingLegLength = null;
+    this.standingThighLength = null;
   }
 
   /** Feed one frame of MoveNet keypoints (flattened length-51 array). */
@@ -103,11 +117,25 @@ export class LungeFsm {
     const ankleL = getKeypoint(keypoints, LEFT_ANKLE);
     const ankleR = getKeypoint(keypoints, RIGHT_ANKLE);
 
-    const required = [shoulderL, shoulderR, hipL, hipR, kneeL, kneeR, ankleL, ankleR];
+    // Ankle NOT required — see squatFsm.ts's identical change for the full on-device
+    // evidence. ankleTrusted (below) gates every specific use of ankle data (front/back knee
+    // classification, kneeDiff, backKneeActive, bothFeetGrounded) so an untrusted ankle can't
+    // corrupt those signals; thighDropFrac/THIGH_DROP_DOWN covers depth detection instead.
+    const required = [shoulderL, shoulderR, hipL, hipR, kneeL, kneeR];
     if (required.some((p) => p.conf < CONF_THRESHOLD)) {
       // Low-confidence frame (e.g. body partially out of view) — don't miscount, just hold.
+      if (DEBUG_LUNGE && shouldLogFsmFrame()) {
+        console.log(
+          `[LUNGE] LOW-CONFIDENCE FRAME, pausing — ` +
+          `shoulderL=${shoulderL.conf.toFixed(2)} shoulderR=${shoulderR.conf.toFixed(2)} ` +
+          `hipL=${hipL.conf.toFixed(2)} hipR=${hipR.conf.toFixed(2)} ` +
+          `kneeL=${kneeL.conf.toFixed(2)} kneeR=${kneeR.conf.toFixed(2)} ` +
+          `ankleL=${ankleL.conf.toFixed(2)} ankleR=${ankleR.conf.toFixed(2)}`
+        );
+      }
       return this.lastState;
     }
+    const ankleTrusted = ankleL.conf >= CONF_THRESHOLD && ankleR.conf >= CONF_THRESHOLD;
 
     const angleL = calculateAngle(hipL, kneeL, ankleL);
     const angleR = calculateAngle(hipR, kneeR, ankleR);
@@ -123,21 +151,33 @@ export class LungeFsm {
     const leanR = spineLeanAngle(shoulderR, hipR);
     const lean = (leanL + leanR) / 2;
 
+    // kneeDiff/bothFeetGrounded/backKneeActive are all ankle/angle-derived — only meaningful
+    // when ankleTrusted (below).
     const kneeDiff = backKneeRaw - frontKneeRaw;
     const bothFeetGrounded = Math.abs(ankleL.y - ankleR.y) < BOTH_FEET_GROUNDED_DIFF;
     const backKneeActive = backKneeRaw < BACK_KNEE_ACTIVE_ANGLE;
 
-    // Hip-drop fraction against the standing reference — see HIP_DROP_DOWN above. Computed
-    // BEFORE this frame's reference refresh below, so a rep-starting frame is measured
-    // against where standing actually was, not against itself.
+    // Hip-drop fractions against the standing references — see HIP_DROP_DOWN/THIGH_DROP_DOWN
+    // above. Computed BEFORE this frame's reference refresh below, so a rep-starting frame is
+    // measured against where standing actually was, not against itself.
     const hipY = (hipL.y + hipR.y) / 2;
+    const kneeY = (kneeL.y + kneeR.y) / 2;
     const ankleY = (ankleL.y + ankleR.y) / 2;
     const hipDropFrac =
       this.standingHipY != null && this.standingLegLength != null
         ? (hipY - this.standingHipY) / this.standingLegLength
         : 0;
+    const thighDropFrac =
+      this.standingHipY != null && this.standingThighLength != null
+        ? (hipY - this.standingHipY) / this.standingThighLength
+        : 0;
 
-    const genuinelyStanding = frontKnee > STANDING_ANGLE && backKneeRaw > STANDING_ANGLE;
+    // Angle-based when ankle is trusted (original, unchanged behavior — both legs need to
+    // read straight to count as standing). Falls back to thighDropFrac otherwise, same
+    // cold-start bootstrap as squatFsm.ts (defaults to standing before any reference exists).
+    const genuinelyStanding = ankleTrusted
+      ? frontKnee > STANDING_ANGLE && backKneeRaw > STANDING_ANGLE
+      : this.standingHipY == null || thighDropFrac < THIGH_STANDING_MAX;
     if (genuinelyStanding) {
       if (this.stage === 'DOWN') {
         this.counter += 1;
@@ -146,21 +186,31 @@ export class LungeFsm {
       this.stage = 'UP';
     }
 
-    // angleTrigger keeps the ORIGINAL Python-prototype-validated behavior unchanged.
+    // angleTrigger keeps the ORIGINAL Python-prototype-validated behavior unchanged, but only
+    // when ankleTrusted — an untrusted ankle makes front/back knee classification itself
+    // unreliable, not just imprecise (see squatFsm.ts's identical reasoning).
     // hipTrigger deliberately does NOT gate on kneeDiff/backKneeActive: both are derived from
     // the same 2D-projected knee angles that are unreliable at the camera angle where the
     // angle trigger already fails (see squatFsm.ts's kneeSym reasoning — identical logic
-    // applies here). bothFeetGrounded stays a shared gate for both — it's a position check,
-    // not an angle, so it's not camera-angle-fragile.
+    // applies here). bothFeetGrounded stays a shared gate for both when ankleTrusted — it's a
+    // position check, not an angle, so it's not camera-angle-fragile, just
+    // ankle-visibility-fragile like everything else ankle-derived here.
     const angleTrigger =
-      frontKnee < BOTTOM_FRONT_ANGLE && kneeDiff > KNEE_DIFF_THRESHOLD && backKneeActive;
-    const hipTrigger = hipDropFrac > HIP_DROP_DOWN;
+      ankleTrusted && frontKnee < BOTTOM_FRONT_ANGLE && kneeDiff > KNEE_DIFF_THRESHOLD && backKneeActive;
+    const hipTrigger = ankleTrusted && hipDropFrac > HIP_DROP_DOWN;
+    // Ankle-independent depth trigger — see THIGH_DROP_DOWN above.
+    const thighTrigger = thighDropFrac > THIGH_DROP_DOWN;
     // Camera-angle-robust "reached proper lunge depth" signal, reused below for score,
     // feedback, and status — mirrors squatFsm.ts's goodDepth for the same reason (a rep could
     // count via hipTrigger yet still score/display as shallow if only the raw angle range were
     // checked here).
-    const goodDepth = (frontKnee >= PERFECT_MIN && frontKnee <= PERFECT_MAX) || hipTrigger;
-    if (this.stage === 'UP' && (angleTrigger || hipTrigger) && bothFeetGrounded) {
+    const goodDepth =
+      (ankleTrusted && frontKnee >= PERFECT_MIN && frontKnee <= PERFECT_MAX) ||
+      hipTrigger ||
+      thighDropFrac > THIGH_DROP_DOWN;
+    // bothFeetGrounded only gates when ankleTrusted — see squatFsm.ts's identical footDiff
+    // treatment.
+    if (this.stage === 'UP' && (angleTrigger || hipTrigger || thighTrigger) && (!ankleTrusted || bothFeetGrounded)) {
       this.stage = 'DOWN';
       this.lungeFormGood = goodDepth && lean < FORM_LEAN_MAX;
     }
@@ -168,36 +218,46 @@ export class LungeFsm {
     // Track the BEST (smallest/most-standing) hipY seen across the whole set — deliberately
     // not reset per rep. See squatFsm.ts for the full reasoning (both the "why min-tracking
     // instead of overwrite" and "why not reset per rep" bugs were found and fixed there first).
+    // Gated on genuinelyStanding (not the raw angle check) so this still converges via the
+    // thigh-based path when ankle isn't trusted — see squatFsm.ts's identical change.
     if (genuinelyStanding && (this.standingHipY == null || hipY < this.standingHipY)) {
       this.standingHipY = hipY;
       this.standingLegLength = Math.max(ankleY - hipY, 1e-6);
+      this.standingThighLength = Math.max(kneeY - hipY, 1e-6);
     }
 
     if (DEBUG_LUNGE && shouldLogFsmFrame()) {
       console.log(
-        `[LUNGE] stage=${this.stage} front=${frontKnee.toFixed(1)}° back=${backKneeRaw.toFixed(1)}° ` +
-        `hipY=${hipY.toFixed(3)} standingHipY=${this.standingHipY?.toFixed(3) ?? 'null'} ` +
-        `standingLegLen=${this.standingLegLength?.toFixed(3) ?? 'null'} hipDropFrac=${hipDropFrac.toFixed(3)} ` +
+        `[LUNGE] stage=${this.stage} front=${frontKnee.toFixed(1)}° back=${backKneeRaw.toFixed(1)}° ankleTrusted=${ankleTrusted} ` +
+        `hipY=${hipY.toFixed(3)} kneeY=${kneeY.toFixed(3)} standingHipY=${this.standingHipY?.toFixed(3) ?? 'null'} ` +
+        `standingLegLen=${this.standingLegLength?.toFixed(3) ?? 'null'} standingThighLen=${this.standingThighLength?.toFixed(3) ?? 'null'} ` +
+        `hipDropFrac=${hipDropFrac.toFixed(3)} thighDropFrac=${thighDropFrac.toFixed(3)}(>${THIGH_DROP_DOWN}) ` +
         `kneeDiff=${kneeDiff.toFixed(1)}(>${KNEE_DIFF_THRESHOLD}) grounded=${bothFeetGrounded} backActive=${backKneeActive} ` +
-        `angleTrigger=${angleTrigger} hipTrigger=${hipTrigger}`
+        `angleTrigger=${angleTrigger} hipTrigger=${hipTrigger} thighTrigger=${thighTrigger}`
       );
     }
 
-    const lungeAttempt = frontKnee < LUNGE_ATTEMPT_ANGLE;
+    // lungeAttempt and everything below gated on it are ankle-dependent (frontKnee itself
+    // needs ankle) — only trusted when ankleTrusted, same as squatFsm.ts's equivalent gates.
+    // Without ankleTrusted, feedback/status fall back to the simpler genuinelyStanding/
+    // goodDepth signals, same as squatFsm.ts — leg-specific coaching (which leg is front,
+    // whether the back knee is bent enough) isn't available without a trustworthy ankle to
+    // tell the legs apart in the first place.
+    const lungeAttempt = ankleTrusted && frontKnee < LUNGE_ATTEMPT_ANGLE;
     let feedback: string;
     if (lean > LEAN_BAD) {
       feedback = 'Keep torso upright';
-    } else if (!bothFeetGrounded && lungeAttempt) {
+    } else if (ankleTrusted && !bothFeetGrounded && lungeAttempt) {
       feedback = 'Keep both feet on the floor';
-    } else if (!backKneeActive && lungeAttempt) {
+    } else if (ankleTrusted && !backKneeActive && lungeAttempt) {
       feedback = 'Bend back knee - real lunge';
-    } else if (kneeDiff < KNEE_DIFF_THRESHOLD && frontKnee < STEP_FURTHER_FRONT_ANGLE) {
+    } else if (ankleTrusted && kneeDiff < KNEE_DIFF_THRESHOLD && frontKnee < STEP_FURTHER_FRONT_ANGLE) {
       feedback = 'Step further forward';
-    } else if (this.stage === 'UP' || frontKnee > STEP_FURTHER_FRONT_ANGLE) {
+    } else if (this.stage === 'UP' || (ankleTrusted && frontKnee > STEP_FURTHER_FRONT_ANGLE)) {
       feedback = 'Lunge Down';
     } else if (goodDepth) {
       feedback = 'Good Lunge Depth!';
-    } else if (frontKnee < TOO_LOW_ANGLE) {
+    } else if (ankleTrusted && frontKnee < TOO_LOW_ANGLE) {
       feedback = 'Too Low - rise slightly';
     } else {
       feedback = 'Keep Going Down';
@@ -206,7 +266,7 @@ export class LungeFsm {
     let status: 'good' | 'adjust' | 'error' | 'guide';
     if (this.stage === null) {
       status = 'guide';
-    } else if (lean > LEAN_BAD || (!bothFeetGrounded && lungeAttempt) || (!backKneeActive && lungeAttempt) || frontKnee < TOO_LOW_ANGLE) {
+    } else if (lean > LEAN_BAD || (ankleTrusted && !bothFeetGrounded && lungeAttempt) || (ankleTrusted && !backKneeActive && lungeAttempt) || (ankleTrusted && frontKnee < TOO_LOW_ANGLE)) {
       status = 'error';
     } else if (goodDepth) {
       status = 'good';

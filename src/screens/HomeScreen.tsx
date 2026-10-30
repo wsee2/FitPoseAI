@@ -11,7 +11,7 @@ import { StatCard } from '../components/ui/StatCard';
 import { NeonButton } from '../components/ui/NeonButton';
 import { ProgressRing } from '../components/ui/ProgressRing';
 import { useApp } from '../context/AppContext';
-import { EXERCISES, MOCK_HISTORY, formatDuration, formatRepsOrHold, getScoreGrade } from '../data/exercises';
+import { EXERCISES, MOCK_HISTORY, formatDuration, formatFormScore, getScoreGrade, getAchievementScore } from '../data/exercises';
 import type { HomeScreenNavigationProp } from '../navigation/types';
 import { saveWorkout } from '../services/firebaseWorkout';
 
@@ -184,7 +184,11 @@ export default function HomeScreen({ navigation }: Props) {
           <View style={styles.sessionsList}>
             {recentSessions.map((session, index) => {
               const ex = EXERCISES[session.exerciseId];
-              const grade = getScoreGrade(session.score);
+              // Grade is achievement-based (did the session hit its rep/set target) — see
+              // getAchievementScore. The form-quality score (was form good) is shown
+              // separately in the meta line via formatFormScore, which already includes the
+              // rep/hold count so it subsumes the old formatRepsOrHold there.
+              const grade = getScoreGrade(getAchievementScore(session));
               return (
                 <View key={session.id} style={styles.sessionCard}>
                   <LinearGradient colors={['#1A1A1A', '#141414']} style={styles.sessionCardGrad}>
@@ -193,11 +197,11 @@ export default function HomeScreen({ navigation }: Props) {
                     </View>
                     <View style={styles.sessionInfo}>
                       <Text style={styles.sessionName}>{ex.name}</Text>
-                      <Text style={styles.sessionMeta}>{formatRepsOrHold(session)} · {formatDuration(session.duration)} · {session.date}</Text>
+                      <Text style={styles.sessionMeta}>{formatFormScore(session)} · {formatDuration(session.duration)} · {session.date}</Text>
                     </View>
                     <View style={styles.sessionScore}>
                       <Text style={[styles.sessionGrade, { color: grade.color }]}>{grade.grade}</Text>
-                      <Text style={styles.sessionScoreNum}>{session.score}</Text>
+                      <Text style={styles.sessionScoreNum}>{getAchievementScore(session)}%</Text>
                     </View>
                   </LinearGradient>
                 </View>

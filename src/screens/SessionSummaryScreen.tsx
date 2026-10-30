@@ -11,7 +11,7 @@ import { Colors, BorderRadius, Typography } from '../theme';
 import { ProgressRing } from '../components/ui/ProgressRing';
 import { NeonButton } from '../components/ui/NeonButton';
 import { useApp } from '../context/AppContext';
-import { EXERCISES, formatDuration, getScoreGrade } from '../data/exercises';
+import { EXERCISES, formatDuration, formatFormScore, getScoreGrade, getAchievementScore } from '../data/exercises';
 import type { HomeStackParamList } from '../navigation/types';
 
 type Props = {
@@ -31,7 +31,10 @@ export default function SessionSummaryScreen({ navigation, route }: Props) {
   const insets = useSafeAreaInsets();
   const session = workoutHistory.find(s => s.id === sessionId) ?? workoutHistory[0];
   const exercise = session ? EXERCISES[session.exerciseId] : EXERCISES.squat;
-  const grade = session ? getScoreGrade(session.score) : getScoreGrade(0);
+  // Grade is achievement-based (did the session hit its rep/set target) — see
+  // getAchievementScore. The form-quality score (was form good) is shown separately, via
+  // the stats grid's Form Score box and the "Form" badge below.
+  const grade = session ? getScoreGrade(getAchievementScore(session)) : getScoreGrade(0);
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(0.8)).current;
@@ -64,7 +67,9 @@ export default function SessionSummaryScreen({ navigation, route }: Props) {
   });
 
   const statItems = [
-    { label: 'Reps', value: session.reps.toString(), color: exercise.accentColor, icon: '🔁' },
+    // Form Score (points earned / reps done) subsumes the plain rep count as its
+    // denominator, so this replaces what used to be a bare "Reps" stat.
+    { label: 'Form Score', value: formatFormScore(session), color: exercise.accentColor, icon: '🔁' },
     { label: 'Duration', value: formatDuration(session.duration), color: Colors.cyan, icon: '⏱' },
     { label: 'Calories', value: `${session.calories}`, unit: 'kcal', color: Colors.orange, icon: '🔥' },
     { label: 'Form', value: session.formQuality, color: Colors.success, icon: '✓' },
@@ -104,12 +109,12 @@ export default function SessionSummaryScreen({ navigation, route }: Props) {
             </View>
 
             <ProgressRing
-              progress={session.score}
+              progress={getAchievementScore(session)}
               size={140}
               strokeWidth={12}
               color={exercise.accentColor}
-              label={session.score.toString()}
-              sublabel="score"
+              label={`${getAchievementScore(session)}%`}
+              sublabel="achieved"
               animated
             />
 

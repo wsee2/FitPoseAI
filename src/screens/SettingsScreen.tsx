@@ -35,11 +35,6 @@ const GOAL_OPTIONS = [
   { id: 'flexibility',       label: 'Flexibility',          emoji: '🤸' },
 ];
 
-const VOICE_OPTIONS = [
-  { id: 'male', label: 'Male', desc: 'Male coaching voice' },
-  { id: 'female', label: 'Female', desc: 'Female coaching voice' },
-];
-
 export default function SettingsScreen({ navigation }: Props) {
   const { profile, updateProfile, authUser, signOutUser } = useApp();
   const { hasPermission: hasCameraPermission } = useCameraPermission();
@@ -94,7 +89,6 @@ export default function SettingsScreen({ navigation }: Props) {
   const insets = useSafeAreaInsets();
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [haptics, setHaptics] = useState(true);
-  const [showVoicePicker, setShowVoicePicker] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameValue, setNameValue] = useState('');
   const [showGoalPicker, setShowGoalPicker] = useState(false);
@@ -131,12 +125,6 @@ export default function SettingsScreen({ navigation }: Props) {
         // type: 'value' (not 'nav') is what actually removes the chevron/tap handler — see
         // the row renderer below, which disables touch and drops onPress for this type.
         { id: 'level', label: 'Experience Level', subtitle: profile?.level ? levelLabels[profile.level] : '—', icon: '📊', type: 'value' },
-      ],
-    },
-    {
-      title: 'AI Coach',
-      rows: [
-        { id: 'voice', label: 'Voice Type', subtitle: VOICE_OPTIONS.find(v => v.id === profile?.voice)?.label ?? 'Male', icon: '🎙️', type: 'nav', onPress: () => setShowVoicePicker(!showVoicePicker) },
       ],
     },
     {
@@ -220,7 +208,7 @@ export default function SettingsScreen({ navigation }: Props) {
                     </View>
                     <View style={styles.rowContent}>
                       <Text style={[styles.rowLabel, row.color ? { color: row.color } : null]}>{row.label}</Text>
-                      {row.subtitle && <Text style={styles.rowSubtitle}>{row.subtitle}</Text>}
+                      {row.subtitle && row.type !== 'value' && <Text style={styles.rowSubtitle}>{row.subtitle}</Text>}
                     </View>
                     {row.type === 'toggle' && (
                       <Switch
@@ -238,25 +226,6 @@ export default function SettingsScreen({ navigation }: Props) {
                     )}
                   </TouchableOpacity>
                   {idx < section.rows.length - 1 && <View style={styles.divider} />}
-
-                  {/* Voice picker */}
-                  {row.id === 'voice' && showVoicePicker && (
-                    <View style={styles.picker}>
-                      {VOICE_OPTIONS.map((opt) => (
-                        <TouchableOpacity
-                          key={opt.id}
-                          style={[styles.pickerOption, profile?.voice === opt.id && styles.pickerOptionActive]}
-                          onPress={() => { updateProfile({ voice: opt.id as any }); setShowVoicePicker(false); }}
-                        >
-                          <View style={styles.pickerText}>
-                            <Text style={[styles.pickerLabel, profile?.voice === opt.id && { color: Colors.cyan }]}>{opt.label}</Text>
-                            <Text style={styles.pickerDesc}>{opt.desc}</Text>
-                          </View>
-                          {profile?.voice === opt.id && <Text style={styles.pickerCheck}>✓</Text>}
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  )}
 
                   {/* Name inline editor */}
                   {row.id === 'name' && editingName && (

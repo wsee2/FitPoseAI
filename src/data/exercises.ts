@@ -35,6 +35,14 @@ export interface WorkoutSession {
   // explicit `undefined` (Firebase RTDB's `push`/`set` reject any property valued
   // `undefined`), so its plain absence means "1 set" / "pre-multi-set session", same as `sets`.
   setDetails?: number[];
+  // Per-set target and planned set count, captured at save time from WorkoutSetupScreen —
+  // needed by getAchievementScore() below, since the app's default target is experience-
+  // level-dependent and the user's level can change after a session was saved (recomputing
+  // from "today's" default would silently rewrite history). Optional — absent on any session
+  // saved before this existed; getAchievementScore() falls back to the form-quality score
+  // for those, same graceful-absence pattern as `sets`/`setDetails` above.
+  targetReps?: number;
+  targetSets?: number;
 }
 
 export const EXERCISES: Record<ExerciseId, Exercise> = {
@@ -178,6 +186,32 @@ export const formatDuration = (seconds: number): string => {
 // distinction aiCoach.ts's buildHistorySummary already makes for the AI coach's context.
 export const formatRepsOrHold = (session: WorkoutSession): string =>
   session.exerciseId === 'plank' ? `${session.reps}s hold` : `${session.reps} reps`;
+
+// Form-quality score, relabeled as "points earned / reps done" (e.g. "50/5 reps") instead of
+// a bare number. That number was previously documented as "0-100" but is actually an
+// unbounded sum (+10 per good-form rep, +5 per not-good-form rep — see each exercise's FSM),
+// which silently exceeds 100 past ~10 reps (12 perfect reps = 120). Purely a display change
+// — the underlying per-rep accumulation is untouched.
+export const formatFormScore = (session: WorkoutSession): string =>
+  session.exerciseId === 'plank'
+    ? `${session.score}/${session.reps}s hold`
+    : `${session.score}/${session.reps} reps`;
+
+// Achievement % — how much of the planned target (per-set target x planned sets) the user
+// actually completed, e.g. target 12 reps x 3 sets = 36 planned; achieved 12+12+6=30 reps ->
+// 83%. Measures "did you hit your goal", distinct from the form-quality score above ("was
+// your form good") — this is what drives the session's letter grade (getScoreGrade), not the
+// form-quality score. Falls back to the form-quality score when a session predates target
+// tracking (targetReps/targetSets absent), so old sessions grade exactly as they did before
+// this existed. Capped at 100 so meaningfully exceeding target still just reads as "fully
+// achieved" rather than the same kind of confusing >100 overflow this feature exists to fix
+// for the form-quality score.
+export const getAchievementScore = (session: WorkoutSession): number => {
+  if (!session.targetReps || !session.targetSets) return session.score;
+  const target = session.targetReps * session.targetSets;
+  if (target <= 0) return session.score;
+  return Math.min(100, Math.round((session.reps / target) * 100));
+};
 
 export const getScoreGrade = (score: number): { grade: string; color: string } => {
   if (score >= 90) return { grade: 'S', color: '#00E5FF' };

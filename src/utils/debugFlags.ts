@@ -2,7 +2,7 @@
 // console + screen and the best available performance — this removes the per-frame
 // string-building + console.log cost entirely (not just throttles it down), and hides the
 // on-screen perf overlay. Neither flag touches any counting/detection/rendering logic.
-export const DEBUG_LOGS = true;
+export const DEBUG_LOGS = false;
 export const PERF_HUD_ENABLED = true;
 
 // Per-frame debug logs (WorkoutScreen's [POSE] log, each exercise FSM's own [SQUAT]/

@@ -11,7 +11,7 @@ import * as Clipboard from 'expo-clipboard';
 import { Colors, BorderRadius } from '../theme';
 import { useApp } from '../context/AppContext';
 import CoachAvatarCircle from '../components/CoachAvatarCircle';
-import { createChatSession, sendChatMessage, getTrendMessage } from '../services/aiCoach';
+import { createChatSession, sendChatMessage, getTrendMessage, MODEL_DISPLAY_NAME } from '../services/aiCoach';
 import type { CoachStackParamList } from '../navigation/types';
 
 type Props = { navigation: NativeStackNavigationProp<CoachStackParamList, 'AICoach'> };
@@ -225,7 +225,7 @@ export default function AICoachScreen({ navigation }: Props) {
               <Text style={styles.coachName}>FitPose AI Coach</Text>
               <View style={styles.onlineRow}>
                 <View style={styles.onlineDot} />
-                <Text style={styles.onlineText}>Online · GPT-4o Mini</Text>
+                <Text style={styles.onlineText}>Online · {MODEL_DISPLAY_NAME}</Text>
               </View>
             </View>
           </View>
